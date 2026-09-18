@@ -17,94 +17,78 @@ DATA_DIR = Path(
 
 app = FastAPI(
     title=APP_NAME,
-    version="1.0.0"
+    version="1.0.0",
+    description="Authorized synthetic-data API",
 )
 
 
-def load_json_files():
-    """
-    Loads only JSON files from DATA_DIR.
-
-    Expected synthetic format:
-
-    [
-        {
-            "id": "FAKE-000001",
-            "mobile": "9000000001",
-            "name": "Demo User",
-            "pincode": "380001",
-            "city": "Ahmedabad",
-            "address": "Demo Address"
-        }
-    ]
-    """
-
+def load_records():
     records = []
 
     if not DATA_DIR.exists():
         return records
 
-    for file_path in DATA_DIR.glob("*.json"):
+    for file_path in sorted(DATA_DIR.glob("*.json")):
         try:
             with open(
                 file_path,
                 "r",
-                encoding="utf-8"
-            ) as f:
-                data = json.load(f)
+                encoding="utf-8",
+            ) as file:
+                data = json.load(file)
 
             if isinstance(data, list):
-                records.extend(data)
+                for item in data:
+                    if isinstance(item, dict):
+                        records.append(item)
 
             elif isinstance(data, dict):
-                if isinstance(data.get("data"), list):
-                    records.extend(data["data"])
+                data_list = data.get("data")
 
-        except Exception as e:
+                if isinstance(data_list, list):
+                    for item in data_list:
+                        if isinstance(item, dict):
+                            records.append(item)
+
+        except Exception as exc:
             print(
-                f"JSON LOAD ERROR {file_path}: {e}"
+                f"JSON LOAD ERROR: {file_path}: {exc}"
             )
 
     return records
 
 
-def search_records(query, limit=20):
-    records = load_json_files()
+def search_records(search_value, limit):
+    search_value = search_value.strip().lower()
 
-    query = query.strip().lower()
+    records = load_records()
 
-    if not query:
+    if not search_value:
         return []
 
     results = []
 
-    searchable_fields = [
+    fields = [
         "id",
         "mobile",
         "name",
         "pincode",
         "city",
-        "address"
+        "address",
     ]
 
     for record in records:
-        if not isinstance(record, dict):
-            continue
 
-        found = False
+        for field in fields:
 
-        for field in searchable_fields:
             value = record.get(field)
 
             if value is None:
                 continue
 
-            if query in str(value).lower():
-                found = True
+            if search_value in str(value).lower():
+                results.append(record)
                 break
-
-        if found:
-            results.append(record)
 
         if len(results) >= limit:
             break
@@ -115,9 +99,9 @@ def search_records(query, limit=20):
 @app.get("/")
 async def root():
     return {
-        "name": APP_NAME,
+        "service": APP_NAME,
         "status": "online",
-        "message": "API server is running."
+        "version": "1.0.0",
     }
 
 
@@ -128,19 +112,23 @@ async def health():
         "service": APP_NAME,
         "time": datetime.now(
             timezone.utc
-        ).isoformat()
+        ).isoformat(),
     }
 
 
 @app.get("/api/search")
-async def api_search(
+async def search_api(
     api_key: str = Query(...),
-    query: str = Query(..., min_length=1, max_length=100),
+    query: str = Query(
+        ...,
+        min_length=1,
+        max_length=100,
+    ),
     limit: int = Query(
         20,
         ge=1,
-        le=50
-    )
+        le=50,
+    ),
 ):
     key = database.get_api_key(api_key)
 
@@ -149,50 +137,49 @@ async def api_search(
             status_code=401,
             content={
                 "success": False,
-                "error": "invalid_api_key"
-            }
+                "error": "invalid_api_key",
+            },
         )
 
-    # Expiration check
-    expires_at = key["expires_at"]
-
-    if expires_at:
+    if key["expires_at"]:
         try:
             expires = datetime.fromisoformat(
-                expires_at
+                key["expires_at"]
             )
 
             if expires < datetime.now(timezone.utc):
+
                 database.log_request(
                     key["id"],
                     query,
                     False,
-                    403
+                    403,
                 )
 
                 return JSONResponse(
                     status_code=403,
                     content={
                         "success": False,
-                        "error": "api_key_expired"
-                    }
+                        "error": "api_key_expired",
+                    },
                 )
 
         except ValueError:
             pass
 
-    allowed, reason, updated_key = database.consume_request(
-        api_key
+    allowed, reason, updated_key = (
+        database.consume_api_request(api_key)
     )
 
     if not allowed:
 
         if reason == "daily_limit":
+
             database.log_request(
                 key["id"],
                 query,
                 False,
-                429
+                429,
             )
 
             return JSONResponse(
@@ -200,35 +187,30 @@ async def api_search(
                 content={
                     "success": False,
                     "error": "daily_limit_reached",
-                    "daily_limit": key["daily_limit"]
-                }
+                    "daily_limit": key[
+                        "daily_limit"
+                    ],
+                },
             )
-
-        database.log_request(
-            key["id"],
-            query,
-            False,
-            401
-        )
 
         return JSONResponse(
             status_code=401,
             content={
                 "success": False,
-                "error": "invalid_api_key"
-            }
+                "error": "invalid_api_key",
+            },
         )
 
     results = search_records(
         query,
-        limit
+        limit,
     )
 
     database.log_request(
-        key["id"],
+        updated_key["id"],
         query,
         True,
-        200
+        200,
     )
 
     return {
@@ -236,17 +218,23 @@ async def api_search(
         "query": query,
         "count": len(results),
         "usage": {
-            "today": updated_key["today_requests"],
-            "daily_limit": updated_key["daily_limit"],
-            "total": updated_key["total_requests"]
+            "today": updated_key[
+                "today_requests"
+            ],
+            "daily_limit": updated_key[
+                "daily_limit"
+            ],
+            "total": updated_key[
+                "total_requests"
+            ],
         },
-        "results": results
+        "results": results,
     }
 
 
 @app.get("/api/status")
 async def api_status(
-    api_key: str = Query(...)
+    api_key: str = Query(...),
 ):
     key = database.get_api_key(api_key)
 
@@ -255,18 +243,32 @@ async def api_status(
             status_code=401,
             content={
                 "success": False,
-                "error": "invalid_api_key"
-            }
+                "error": "invalid_api_key",
+            },
         )
 
     return {
         "success": True,
         "plan": key["plan"],
         "status": key["status"],
-        "today_requests": key["today_requests"],
-        "daily_limit": key["daily_limit"],
-        "total_requests": key["total_requests"],
-        "expires_at": key["expires_at"]
+        "today_requests": key[
+            "today_requests"
+        ],
+        "daily_limit": key[
+            "daily_limit"
+        ],
+        "total_requests": key[
+            "total_requests"
+        ],
+        "expires_at": key["expires_at"],
+    }
+
+
+@app.get("/api/stats")
+async def public_stats():
+    return {
+        "service": APP_NAME,
+        "status": "online",
     }
 
 
@@ -274,11 +276,11 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(
-        os.getenv("PORT", "8000")
+        os.getenv("PORT", "10000")
     )
 
     uvicorn.run(
         "api:app",
         host="0.0.0.0",
-        port=port
+        port=port,
     )
