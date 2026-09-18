@@ -1,189 +1,239 @@
 import os
 import sqlite3
 import hashlib
+import secrets
 from datetime import datetime, timezone
 
 
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 
-def utc_now():
-    return datetime.now(timezone.utc)
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 
-def utc_iso():
-    return utc_now().isoformat()
-
-
-def today():
-    return utc_now().date().isoformat()
-
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
+def get_connection():
+    conn = sqlite3.connect(
+        DB_PATH,
+        check_same_thread=False
+    )
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    conn = get_db()
+    conn = get_connection()
+    cur = conn.cursor()
 
-    conn.executescript(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            created_at TEXT NOT NULL,
-            last_seen TEXT NOT NULL
-        );
+            chat_id INTEGER PRIMARY KEY,
+            username TEXT DEFAULT '',
+            first_name TEXT DEFAULT '',
+            blocked INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
 
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS access_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
             plan TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
+            created_at TEXT NOT NULL
+        )
+    """)
 
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS api_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            key_hash TEXT NOT NULL UNIQUE,
-            key_prefix TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            key_hash TEXT UNIQUE NOT NULL,
             plan TEXT NOT NULL,
             daily_limit INTEGER NOT NULL,
             today_requests INTEGER NOT NULL DEFAULT 0,
             total_requests INTEGER NOT NULL DEFAULT 0,
-            usage_date TEXT NOT NULL,
+            last_request_date TEXT,
             status TEXT NOT NULL DEFAULT 'active',
-            created_at TEXT NOT NULL,
-            expires_at TEXT
-        );
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
 
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS request_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            api_key_id INTEGER,
+            api_key_id INTEGER NOT NULL,
             query TEXT,
-            success INTEGER NOT NULL DEFAULT 0,
-            status_code INTEGER,
+            success INTEGER NOT NULL,
+            status_code INTEGER NOT NULL,
             created_at TEXT NOT NULL
-        );
-        """
-    )
+        )
+    """)
+
+    # Migration for old databases
+    try:
+        cur.execute(
+            "ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
 
 
-def save_user(user_id, username=None, first_name=None):
-    conn = get_db()
+def save_user(chat_id, username="", first_name=""):
+    conn = get_connection()
 
-    row = conn.execute(
-        "SELECT user_id FROM users WHERE user_id = ?",
-        (user_id,),
-    ).fetchone()
-
-    if row:
-        conn.execute(
-            """
-            UPDATE users
-            SET username = ?,
-                first_name = ?,
-                last_seen = ?
-            WHERE user_id = ?
-            """,
-            (username, first_name, utc_iso(), user_id),
+    conn.execute("""
+        INSERT INTO users (
+            chat_id,
+            username,
+            first_name,
+            created_at
         )
-    else:
-        conn.execute(
-            """
-            INSERT INTO users
-            (user_id, username, first_name, created_at, last_seen)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                username,
-                first_name,
-                utc_iso(),
-                utc_iso(),
-            ),
-        )
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(chat_id)
+        DO UPDATE SET
+            username = excluded.username,
+            first_name = excluded.first_name
+    """, (
+        chat_id,
+        username or "",
+        first_name or "",
+        now_iso()
+    ))
 
     conn.commit()
     conn.close()
 
 
-def create_access_request(user_id, plan):
-    conn = get_db()
+def is_user_blocked(chat_id):
+    conn = get_connection()
 
-    pending = conn.execute(
-        """
-        SELECT id
-        FROM access_requests
-        WHERE user_id = ?
-        AND status = 'pending'
-        """,
-        (user_id,),
-    ).fetchone()
+    row = conn.execute("""
+        SELECT blocked
+        FROM users
+        WHERE chat_id = ?
+    """, (chat_id,)).fetchone()
 
-    if pending:
-        conn.close()
-        return False, pending["id"]
+    conn.close()
 
-    cur = conn.execute(
-        """
-        INSERT INTO access_requests
-        (user_id, plan, status, created_at, updated_at)
-        VALUES (?, ?, 'pending', ?, ?)
-        """,
-        (
-            user_id,
+    if not row:
+        return False
+
+    return bool(row["blocked"])
+
+
+def block_user(chat_id):
+    conn = get_connection()
+
+    conn.execute("""
+        UPDATE users
+        SET blocked = 1
+        WHERE chat_id = ?
+    """, (chat_id,))
+
+    conn.commit()
+    conn.close()
+
+
+def unblock_user(chat_id):
+    conn = get_connection()
+
+    conn.execute("""
+        UPDATE users
+        SET blocked = 0
+        WHERE chat_id = ?
+    """, (chat_id,))
+
+    conn.commit()
+    conn.close()
+
+
+def get_users(limit=30):
+    conn = get_connection()
+
+    rows = conn.execute("""
+        SELECT *
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def create_request(chat_id, plan):
+    conn = get_connection()
+
+    cur = conn.execute("""
+        INSERT INTO access_requests (
+            chat_id,
             plan,
-            utc_iso(),
-            utc_iso(),
-        ),
-    )
+            status,
+            created_at
+        )
+        VALUES (?, ?, 'pending', ?)
+    """, (
+        chat_id,
+        plan,
+        now_iso()
+    ))
 
     request_id = cur.lastrowid
 
     conn.commit()
     conn.close()
 
-    return True, request_id
+    return request_id
 
 
-def get_access_request(request_id):
-    conn = get_db()
+def get_request(request_id):
+    conn = get_connection()
 
-    row = conn.execute(
-        """
+    row = conn.execute("""
         SELECT *
         FROM access_requests
         WHERE id = ?
-        """,
-        (request_id,),
-    ).fetchone()
+    """, (request_id,)).fetchone()
 
     conn.close()
 
-    return row
+    return dict(row) if row else None
 
 
-def update_access_request(request_id, status):
-    conn = get_db()
+def get_pending_requests(limit=30):
+    conn = get_connection()
 
-    conn.execute(
-        """
+    rows = conn.execute("""
+        SELECT *
+        FROM access_requests
+        WHERE status = 'pending'
+        ORDER BY id DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def update_request(request_id, status):
+    conn = get_connection()
+
+    conn.execute("""
         UPDATE access_requests
-        SET status = ?,
-            updated_at = ?
+        SET status = ?
         WHERE id = ?
-        """,
-        (status, utc_iso(), request_id),
-    )
+    """, (
+        status,
+        request_id
+    ))
 
     conn.commit()
     conn.close()
@@ -196,270 +246,290 @@ def hash_key(api_key):
 
 
 def create_api_key(
-    user_id,
-    api_key,
+    chat_id,
     plan,
     daily_limit,
-    expires_at,
+    days=30
 ):
-    conn = get_db()
-
-    key_hash = hash_key(api_key)
-    key_prefix = api_key[:12]
-
-    cur = conn.execute(
-        """
-        INSERT INTO api_keys
-        (
-            user_id,
-            key_hash,
-            key_prefix,
-            plan,
-            daily_limit,
-            today_requests,
-            total_requests,
-            usage_date,
-            status,
-            created_at,
-            expires_at
-        )
-        VALUES (?, ?, ?, ?, ?, 0, 0, ?, 'active', ?, ?)
-        """,
-        (
-            user_id,
-            key_hash,
-            key_prefix,
-            plan,
-            daily_limit,
-            today(),
-            utc_iso(),
-            expires_at,
-        ),
+    raw_key = (
+        "KCE_"
+        + secrets.token_urlsafe(32)
     )
+
+    key_hash = hash_key(raw_key)
+
+    from datetime import timedelta
+
+    expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(days=days)
+    ).isoformat()
+
+    conn = get_connection()
+
+    cur = conn.execute("""
+        INSERT INTO api_keys (
+            chat_id,
+            key_hash,
+            plan,
+            daily_limit,
+            expires_at,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        chat_id,
+        key_hash,
+        plan,
+        daily_limit,
+        expires_at,
+        now_iso()
+    ))
 
     key_id = cur.lastrowid
 
     conn.commit()
     conn.close()
 
-    return key_id
+    return raw_key, key_id
 
 
-def get_api_key(api_key):
-    conn = get_db()
+def get_api_key(raw_key):
+    conn = get_connection()
 
-    row = conn.execute(
-        """
+    row = conn.execute("""
         SELECT *
         FROM api_keys
         WHERE key_hash = ?
         AND status = 'active'
-        """,
-        (hash_key(api_key),),
-    ).fetchone()
+    """, (
+        hash_key(raw_key),
+    )).fetchone()
 
     conn.close()
 
-    return row
+    return dict(row) if row else None
 
 
-def consume_api_request(api_key):
-    conn = get_db()
+def consume_request(raw_key):
+    conn = get_connection()
 
-    row = conn.execute(
-        """
-        SELECT *
+    row = conn.execute("""
+        SELECT
+            api_keys.*,
+            users.blocked
         FROM api_keys
-        WHERE key_hash = ?
-        AND status = 'active'
-        """,
-        (hash_key(api_key),),
-    ).fetchone()
+        LEFT JOIN users
+            ON users.chat_id = api_keys.chat_id
+        WHERE api_keys.key_hash = ?
+        AND api_keys.status = 'active'
+    """, (
+        hash_key(raw_key),
+    )).fetchone()
 
     if not row:
         conn.close()
-        return False, "invalid_key", None
+        return False, "invalid", None
 
-    current_date = today()
+    key = dict(row)
 
-    if row["usage_date"] != current_date:
-        conn.execute(
-            """
-            UPDATE api_keys
-            SET today_requests = 0,
-                usage_date = ?
-            WHERE id = ?
-            """,
-            (current_date, row["id"]),
-        )
-
-        conn.commit()
-
-        row = conn.execute(
-            """
-            SELECT *
-            FROM api_keys
-            WHERE id = ?
-            """,
-            (row["id"],),
-        ).fetchone()
-
-    if row["today_requests"] >= row["daily_limit"]:
+    if key.get("blocked"):
         conn.close()
-        return False, "daily_limit", row
+        return False, "blocked", key
 
-    conn.execute(
-        """
-        UPDATE api_keys
-        SET today_requests = today_requests + 1,
-            total_requests = total_requests + 1
-        WHERE id = ?
-        """,
-        (row["id"],),
+    today = datetime.now(
+        timezone.utc
+    ).date().isoformat()
+
+    if key["last_request_date"] != today:
+        today_requests = 0
+    else:
+        today_requests = key["today_requests"]
+
+    if today_requests >= key["daily_limit"]:
+        conn.close()
+        return False, "daily_limit", key
+
+    today_requests += 1
+    total_requests = (
+        key["total_requests"] + 1
     )
+
+    conn.execute("""
+        UPDATE api_keys
+        SET
+            today_requests = ?,
+            total_requests = ?,
+            last_request_date = ?
+        WHERE id = ?
+    """, (
+        today_requests,
+        total_requests,
+        today,
+        key["id"]
+    ))
 
     conn.commit()
 
-    updated = conn.execute(
-        """
+    updated = conn.execute("""
         SELECT *
         FROM api_keys
         WHERE id = ?
-        """,
-        (row["id"],),
-    ).fetchone()
+    """, (
+        key["id"],
+    )).fetchone()
 
     conn.close()
 
-    return True, "ok", updated
+    return True, "ok", dict(updated)
 
 
-def get_user_keys(user_id):
-    conn = get_db()
+def get_user_keys(chat_id):
+    conn = get_connection()
 
-    rows = conn.execute(
-        """
+    rows = conn.execute("""
         SELECT *
         FROM api_keys
-        WHERE user_id = ?
+        WHERE chat_id = ?
         ORDER BY id DESC
-        """,
-        (user_id,),
-    ).fetchall()
+    """, (
+        chat_id,
+    )).fetchall()
 
     conn.close()
 
-    return rows
+    return [dict(row) for row in rows]
 
 
-def get_pending_requests():
-    conn = get_db()
+def get_all_keys(limit=50):
+    conn = get_connection()
 
-    rows = conn.execute(
-        """
-        SELECT
-            ar.*,
-            u.username,
-            u.first_name
-        FROM access_requests ar
-        LEFT JOIN users u
-            ON ar.user_id = u.user_id
-        WHERE ar.status = 'pending'
-        ORDER BY ar.id ASC
-        """
-    ).fetchall()
+    rows = conn.execute("""
+        SELECT *
+        FROM api_keys
+        ORDER BY id DESC
+        LIMIT ?
+    """, (
+        limit,
+    )).fetchall()
 
     conn.close()
 
-    return rows
+    return [dict(row) for row in rows]
 
 
 def revoke_key(key_id):
-    conn = get_db()
+    conn = get_connection()
 
-    cur = conn.execute(
-        """
+    cur = conn.execute("""
         UPDATE api_keys
         SET status = 'revoked'
         WHERE id = ?
-        """,
-        (key_id,),
-    )
-
-    conn.commit()
+    """, (
+        key_id,
+    ))
 
     changed = cur.rowcount
 
+    conn.commit()
     conn.close()
 
     return changed > 0
-
-
-def get_stats():
-    conn = get_db()
-
-    users = conn.execute(
-        "SELECT COUNT(*) AS c FROM users"
-    ).fetchone()["c"]
-
-    active_keys = conn.execute(
-        """
-        SELECT COUNT(*) AS c
-        FROM api_keys
-        WHERE status = 'active'
-        """
-    ).fetchone()["c"]
-
-    total_requests = conn.execute(
-        """
-        SELECT COALESCE(SUM(total_requests), 0) AS c
-        FROM api_keys
-        """
-    ).fetchone()["c"]
-
-    pending = conn.execute(
-        """
-        SELECT COUNT(*) AS c
-        FROM access_requests
-        WHERE status = 'pending'
-        """
-    ).fetchone()["c"]
-
-    conn.close()
-
-    return {
-        "users": users,
-        "active_keys": active_keys,
-        "total_requests": total_requests,
-        "pending": pending,
-    }
 
 
 def log_request(
     api_key_id,
     query,
     success,
-    status_code,
+    status_code
 ):
-    conn = get_db()
+    conn = get_connection()
 
-    conn.execute(
-        """
-        INSERT INTO request_logs
-        (api_key_id, query, success, status_code, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
+    conn.execute("""
+        INSERT INTO request_logs (
             api_key_id,
-            str(query)[:500],
-            1 if success else 0,
+            query,
+            success,
             status_code,
-            utc_iso(),
-        ),
-    )
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        api_key_id,
+        query,
+        1 if success else 0,
+        status_code,
+        now_iso()
+    ))
 
     conn.commit()
     conn.close()
 
 
-init_db()
+def get_usage_stats():
+    conn = get_connection()
+
+    users = conn.execute(
+        "SELECT COUNT(*) AS c FROM users"
+    ).fetchone()["c"]
+
+    blocked = conn.execute(
+        "SELECT COUNT(*) AS c FROM users WHERE blocked = 1"
+    ).fetchone()["c"]
+
+    keys = conn.execute(
+        "SELECT COUNT(*) AS c FROM api_keys"
+    ).fetchone()["c"]
+
+    active_keys = conn.execute(
+        "SELECT COUNT(*) AS c FROM api_keys WHERE status = 'active'"
+    ).fetchone()["c"]
+
+    requests = conn.execute(
+        "SELECT COUNT(*) AS c FROM request_logs"
+    ).fetchone()["c"]
+
+    successful = conn.execute(
+        "SELECT COUNT(*) AS c FROM request_logs WHERE success = 1"
+    ).fetchone()["c"]
+
+    pending = conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM access_requests
+        WHERE status = 'pending'
+    """).fetchone()["c"]
+
+    total_usage = conn.execute("""
+        SELECT COALESCE(SUM(total_requests), 0) AS c
+        FROM api_keys
+    """).fetchone()["c"]
+
+    conn.close()
+
+    return {
+        "users": users,
+        "blocked": blocked,
+        "keys": keys,
+        "active_keys": active_keys,
+        "requests": requests,
+        "successful": successful,
+        "pending": pending,
+        "total_usage": total_usage,
+    }
+
+
+def get_recent_logs(limit=20):
+    conn = get_connection()
+
+    rows = conn.execute("""
+        SELECT *
+        FROM request_logs
+        ORDER BY id DESC
+        LIMIT ?
+    """, (
+        limit,
+    )).fetchall()
+
+    conn.close()
+
+    return [dict(row) for row in rows]
