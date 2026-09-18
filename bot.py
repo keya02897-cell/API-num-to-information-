@@ -1,18 +1,13 @@
 import os
-import json
-import secrets
-import hashlib
-import sqlite3
-import asyncio
 import threading
-from pathlib import Path
-from datetime import datetime, timezone, timedelta
 
 import uvicorn
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,910 +15,255 @@ from telegram.ext import (
     ContextTypes,
 )
 
+import database
+from api import app as fastapi_app
+
 
 # =========================================================
 # KRUTIK CYBER EXPERT
-# API + TELEGRAM BOT
+# TELEGRAM BOT + FASTAPI
 # =========================================================
 
-APP_NAME = "KRUTIK CYBER EXPERT API"
+APP_NAME = "KRUTIK CYBER EXPERT"
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID", "").strip()
+BOT_TOKEN = os.getenv(
+    "BOT_TOKEN",
+    ""
+).strip()
 
-PORT = int(os.getenv("PORT", "10000"))
+OWNER_CHAT_ID = os.getenv(
+    "OWNER_CHAT_ID",
+    ""
+).strip()
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
-
-DB_PATH = os.getenv("DB_PATH", "bot.db")
-
-
-# =========================================================
-# FASTAPI
-# =========================================================
-
-app = FastAPI(
-    title="KRUTIK CYBER EXPERT Bot Service",
-    version="1.0.0",
-    description="Authorized synthetic-data API",
+PORT = int(
+    os.getenv(
+        "PORT",
+        "10000",
+    )
 )
 
 
 # =========================================================
-# DATABASE
+# HELPERS
 # =========================================================
 
-def db_connection():
-    conn = sqlite3.connect(
-        DB_PATH,
-        timeout=30,
-        check_same_thread=False,
+def is_owner(user_id):
+    if not OWNER_CHAT_ID:
+        return False
+
+    return str(user_id) == str(
+        OWNER_CHAT_ID
     )
 
-    conn.row_factory = sqlite3.Row
 
-    return conn
-
-
-def init_db():
-
-    conn = db_connection()
-
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS access_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            username TEXT,
-            plan TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            processed_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS api_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            key_hash TEXT UNIQUE NOT NULL,
-            plan TEXT NOT NULL,
-            daily_limit INTEGER NOT NULL,
-            today_requests INTEGER NOT NULL DEFAULT 0,
-            total_requests INTEGER NOT NULL DEFAULT 0,
-            usage_date TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            expires_at TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS request_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            api_key_id INTEGER,
-            query TEXT,
-            success INTEGER,
-            status_code INTEGER,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    conn.commit()
-
-    conn.close()
-
-
-# =========================================================
-# USERS
-# =========================================================
-
-def save_user(
-    user_id,
-    username,
-    first_name,
+async def owner_only(
+    update: Update,
 ):
-
-    conn = db_connection()
-
-    conn.execute("""
-        INSERT INTO users (
-            user_id,
-            username,
-            first_name,
-            created_at
-        )
-        VALUES (?, ?, ?, ?)
-
-        ON CONFLICT(user_id)
-        DO UPDATE SET
-            username = excluded.username,
-            first_name = excluded.first_name
-    """, (
-        str(user_id),
-        username or "",
-        first_name or "",
-        datetime.now(timezone.utc).isoformat(),
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-# =========================================================
-# API KEY
-# =========================================================
-
-def hash_key(raw_key):
-
-    return hashlib.sha256(
-        raw_key.encode("utf-8")
-    ).hexdigest()
-
-
-def create_api_key(
-    user_id,
-    plan,
-):
-
-    plans = {
-        "basic": {
-            "daily_limit": 1000,
-        },
-        "pro": {
-            "daily_limit": 10000,
-        },
-        "custom": {
-            "daily_limit": 50000,
-        },
-    }
-
-    if plan not in plans:
-        plan = "basic"
-
-    daily_limit = plans[plan]["daily_limit"]
-
-    raw_key = (
-        "KCE_"
-        + secrets.token_urlsafe(32)
-    )
-
-    key_hash = hash_key(raw_key)
-
-    now = datetime.now(timezone.utc)
-
-    expires_at = (
-        now + timedelta(days=30)
-    ).isoformat()
-
-    conn = db_connection()
-
-    # Revoke previous active keys
-    conn.execute("""
-        UPDATE api_keys
-        SET status = 'revoked'
-        WHERE user_id = ?
-        AND status = 'active'
-    """, (
-        str(user_id),
-    ))
-
-    conn.execute("""
-        INSERT INTO api_keys (
-            user_id,
-            key_hash,
-            plan,
-            daily_limit,
-            today_requests,
-            total_requests,
-            usage_date,
-            status,
-            expires_at,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, 0, 0, ?, 'active', ?, ?)
-    """, (
-        str(user_id),
-        key_hash,
-        plan,
-        daily_limit,
-        now.date().isoformat(),
-        expires_at,
-        now.isoformat(),
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return raw_key
-
-
-def get_api_key(raw_key):
-
-    key_hash = hash_key(raw_key)
-
-    conn = db_connection()
-
-    row = conn.execute("""
-        SELECT *
-        FROM api_keys
-        WHERE key_hash = ?
-        LIMIT 1
-    """, (
-        key_hash,
-    )).fetchone()
-
-    conn.close()
-
-    if not row:
-        return None
-
-    return dict(row)
-
-
-def consume_api_request(raw_key):
-
-    key_hash = hash_key(raw_key)
-
-    conn = db_connection()
-
-    row = conn.execute("""
-        SELECT *
-        FROM api_keys
-        WHERE key_hash = ?
-        LIMIT 1
-    """, (
-        key_hash,
-    )).fetchone()
-
-    if not row:
-        conn.close()
-        return False, "invalid_api_key", None
-
-    key = dict(row)
-
-    if key["status"] != "active":
-        conn.close()
-        return False, "invalid_api_key", None
-
-    now = datetime.now(timezone.utc)
-
-    try:
-        expires = datetime.fromisoformat(
-            key["expires_at"]
-        )
-
-        if expires < now:
-
-            conn.execute("""
-                UPDATE api_keys
-                SET status = 'expired'
-                WHERE id = ?
-            """, (
-                key["id"],
-            ))
-
-            conn.commit()
-            conn.close()
-
-            return False, "expired", None
-
-    except Exception:
-        pass
-
-    today = now.date().isoformat()
-
-    today_requests = key["today_requests"]
-
-    if key["usage_date"] != today:
-        today_requests = 0
-
-    if today_requests >= key["daily_limit"]:
-
-        conn.close()
-
-        return False, "daily_limit", key
-
-    new_today = today_requests + 1
-    new_total = key["total_requests"] + 1
-
-    conn.execute("""
-        UPDATE api_keys
-        SET
-            today_requests = ?,
-            total_requests = ?,
-            usage_date = ?
-        WHERE id = ?
-    """, (
-        new_today,
-        new_total,
-        today,
-        key["id"],
-    ))
-
-    conn.commit()
-
-    updated = conn.execute("""
-        SELECT *
-        FROM api_keys
-        WHERE id = ?
-    """, (
-        key["id"],
-    )).fetchone()
-
-    conn.close()
-
-    return True, "ok", dict(updated)
-
-
-def log_request(
-    api_key_id,
-    query,
-    success,
-    status_code,
-):
-
-    conn = db_connection()
-
-    conn.execute("""
-        INSERT INTO request_logs (
-            api_key_id,
-            query,
-            success,
-            status_code,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        api_key_id,
-        query,
-        1 if success else 0,
-        status_code,
-        datetime.now(timezone.utc).isoformat(),
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def create_access_request(
-    user_id,
-    username,
-    plan,
-):
-
-    conn = db_connection()
-
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id
-        FROM access_requests
-        WHERE user_id = ?
-        AND status = 'pending'
-        LIMIT 1
-    """, (
-        str(user_id),
-    ))
-
-    existing = cur.fetchone()
-
-    if existing:
-        conn.close()
-        return existing["id"]
-
-    cur.execute("""
-        INSERT INTO access_requests (
-            user_id,
-            username,
-            plan,
-            status,
-            created_at
-        )
-        VALUES (?, ?, ?, 'pending', ?)
-    """, (
-        str(user_id),
-        username or "",
-        plan,
-        datetime.now(timezone.utc).isoformat(),
-    ))
-
-    request_id = cur.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    return request_id
-
-
-def get_access_request(request_id):
-
-    conn = db_connection()
-
-    row = conn.execute("""
-        SELECT *
-        FROM access_requests
-        WHERE id = ?
-    """, (
-        request_id,
-    )).fetchone()
-
-    conn.close()
-
-    if not row:
-        return None
-
-    return dict(row)
-
-
-def update_access_request(
-    request_id,
-    status,
-):
-
-    conn = db_connection()
-
-    conn.execute("""
-        UPDATE access_requests
-        SET
-            status = ?,
-            processed_at = ?
-        WHERE id = ?
-    """, (
-        status,
-        datetime.now(timezone.utc).isoformat(),
-        request_id,
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def get_pending_requests():
-
-    conn = db_connection()
-
-    rows = conn.execute("""
-        SELECT *
-        FROM access_requests
-        WHERE status = 'pending'
-        ORDER BY id ASC
-    """).fetchall()
-
-    conn.close()
-
-    return [dict(row) for row in rows]
-
-
-def get_user_keys(user_id):
-
-    conn = db_connection()
-
-    rows = conn.execute("""
-        SELECT *
-        FROM api_keys
-        WHERE user_id = ?
-        ORDER BY id DESC
-    """, (
-        str(user_id),
-    )).fetchall()
-
-    conn.close()
-
-    return [dict(row) for row in rows]
-
-
-def get_stats():
-
-    conn = db_connection()
-
-    users = conn.execute(
-        "SELECT COUNT(*) AS c FROM users"
-    ).fetchone()["c"]
-
-    keys = conn.execute(
-        "SELECT COUNT(*) AS c FROM api_keys"
-    ).fetchone()["c"]
-
-    active_keys = conn.execute("""
-        SELECT COUNT(*)
-        FROM api_keys
-        WHERE status = 'active'
-    """).fetchone()[0]
-
-    requests = conn.execute("""
-        SELECT COUNT(*)
-        FROM request_logs
-    """).fetchone()[0]
-
-    conn.close()
-
-    return {
-        "users": users,
-        "keys": keys,
-        "active_keys": active_keys,
-        "api_requests": requests,
-    }
-
-
-# =========================================================
-# DATA LOADER
-# =========================================================
-
-def load_records():
-
-    records = []
-
-    if not DATA_DIR.exists():
-        return records
-
-    for file_path in sorted(
-        DATA_DIR.glob("*.json")
-    ):
-
-        try:
-
-            with open(
-                file_path,
-                "r",
-                encoding="utf-8",
-            ) as file:
-
-                data = json.load(file)
-
-            if isinstance(data, list):
-
-                for item in data:
-
-                    if isinstance(item, dict):
-                        records.append(item)
-
-            elif isinstance(data, dict):
-
-                data_list = data.get("data")
-
-                if isinstance(data_list, list):
-
-                    for item in data_list:
-
-                        if isinstance(item, dict):
-                            records.append(item)
-
-        except Exception as exc:
-
-            print(
-                f"JSON LOAD ERROR: "
-                f"{file_path}: {exc}"
+    user = update.effective_user
+
+    if not is_owner(user.id):
+        if update.message:
+            await update.message.reply_text(
+                "❌ Owner only."
             )
+        return False
 
-    return records
-
-
-def search_records(
-    search_value,
-    limit,
-):
-
-    search_value = (
-        search_value
-        .strip()
-        .lower()
-    )
-
-    if not search_value:
-        return []
-
-    records = load_records()
-
-    results = []
-
-    fields = [
-        "id",
-        "mobile",
-        "name",
-        "pincode",
-        "city",
-        "address",
-    ]
-
-    for record in records:
-
-        for field in fields:
-
-            value = record.get(field)
-
-            if value is None:
-                continue
-
-            if search_value in str(
-                value
-            ).lower():
-
-                results.append(record)
-                break
-
-        if len(results) >= limit:
-            break
-
-    return results
+    return True
 
 
-# =========================================================
-# FASTAPI ROUTES
-# =========================================================
-
-@app.get("/")
-async def root():
-
-    return {
-        "service": APP_NAME,
-        "status": "online",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "search_endpoint": "/api/search",
-        "status_endpoint": "/api/status",
-    }
-
-
-@app.get("/health")
-async def health():
-
-    return {
-        "status": "ok",
-        "service": APP_NAME,
-        "database": "sqlite",
-        "data_directory": str(DATA_DIR),
-        "time": datetime.now(
-            timezone.utc
-        ).isoformat(),
-    }
-
-
-@app.get("/api/search")
-async def api_search(
-    api_key: str = Query(...),
-    query: str = Query(
-        ...,
-        min_length=1,
-        max_length=100,
-    ),
-    limit: int = Query(
-        20,
-        ge=1,
-        le=50,
-    ),
-):
-
-    key = get_api_key(api_key)
-
-    if not key:
-
-        return JSONResponse(
-            status_code=401,
-            content={
-                "success": False,
-                "error": "invalid_api_key",
-            },
-        )
-
-    allowed, reason, updated_key = (
-        consume_api_request(api_key)
-    )
-
-    if not allowed:
-
-        if reason == "daily_limit":
-
-            log_request(
-                key["id"],
-                query,
-                False,
-                429,
-            )
-
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "success": False,
-                    "error": "daily_limit_reached",
-                    "daily_limit": key[
-                        "daily_limit"
-                    ],
-                },
-            )
-
-        if reason == "expired":
-
-            log_request(
-                key["id"],
-                query,
-                False,
-                403,
-            )
-
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "success": False,
-                    "error": "api_key_expired",
-                },
-            )
-
-        return JSONResponse(
-            status_code=401,
-            content={
-                "success": False,
-                "error": "invalid_api_key",
-            },
-        )
-
-    results = search_records(
-        query,
-        limit,
-    )
-
-    log_request(
-        updated_key["id"],
-        query,
-        True,
-        200,
-    )
-
-    return {
-        "success": True,
-        "query": query,
-        "count": len(results),
-        "usage": {
-            "today": updated_key[
-                "today_requests"
-            ],
-            "daily_limit": updated_key[
-                "daily_limit"
-            ],
-            "total": updated_key[
-                "total_requests"
-            ],
-        },
-        "results": results,
-    }
-
-
-@app.get("/api/status")
-async def api_status(
-    api_key: str = Query(...),
-):
-
-    key = get_api_key(api_key)
-
-    if not key:
-
-        return JSONResponse(
-            status_code=401,
-            content={
-                "success": False,
-                "error": "invalid_api_key",
-            },
-        )
-
-    return {
-        "success": True,
-        "plan": key["plan"],
-        "status": key["status"],
-        "today_requests": key[
-            "today_requests"
+def user_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔑 API Plans",
+                callback_data="plans",
+            ),
         ],
-        "daily_limit": key[
-            "daily_limit"
+        [
+            InlineKeyboardButton(
+                "🚀 Request API Access",
+                callback_data="request",
+            ),
         ],
-        "total_requests": key[
-            "total_requests"
+        [
+            InlineKeyboardButton(
+                "🔐 My API Keys",
+                callback_data="keys",
+            ),
         ],
-        "expires_at": key[
-            "expires_at"
+        [
+            InlineKeyboardButton(
+                "📊 My Usage",
+                callback_data="usage",
+            ),
         ],
-    }
+        [
+            InlineKeyboardButton(
+                "📖 How to Use API",
+                callback_data="howto",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📚 API Docs",
+                callback_data="docs",
+            ),
+        ],
+    ])
 
 
-@app.get("/api/stats")
-async def api_stats():
-
-    return {
-        "service": APP_NAME,
-        "status": "online",
-    }
+def admin_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📊 Dashboard",
+                callback_data="admin_dashboard",
+            ),
+            InlineKeyboardButton(
+                "📨 Pending Requests",
+                callback_data="admin_pending",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "👥 Users",
+                callback_data="admin_users",
+            ),
+            InlineKeyboardButton(
+                "🔑 API Keys",
+                callback_data="admin_keys",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📈 API Usage",
+                callback_data="admin_usage",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🚫 Block User",
+                callback_data="admin_block",
+            ),
+            InlineKeyboardButton(
+                "✅ Unblock User",
+                callback_data="admin_unblock",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔴 API OFF",
+                callback_data="admin_apioff",
+            ),
+            InlineKeyboardButton(
+                "🟢 API ON",
+                callback_data="admin_apion",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔒 Revoke API",
+                callback_data="admin_revoke",
+            ),
+            InlineKeyboardButton(
+                "🗑️ Delete API",
+                callback_data="admin_delete",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "➕ Create API Key",
+                callback_data="admin_create",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📖 API Docs",
+                callback_data="docs",
+            ),
+        ],
+    ])
 
 
 # =========================================================
-# TELEGRAM BOT
+# /START
 # =========================================================
 
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     user = update.effective_user
 
-    save_user(
+    database.save_user(
         user.id,
         user.username,
         user.first_name,
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🔑 API Plans",
-                callback_data="plans",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🚀 Request API Access",
-                callback_data="request",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔐 My API Keys",
-                callback_data="keys",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📊 My Usage",
-                callback_data="usage",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📖 API Docs",
-                callback_data="docs",
-            )
-        ],
-    ]
+    if (
+        not is_owner(user.id)
+        and database.is_user_blocked(user.id)
+    ):
+        await update.message.reply_text(
+            "🚫 Your account is blocked."
+        )
+        return
 
-    await update.message.reply_text(
+    text = (
         "🔥 KRUTIK CYBER EXPERT\n\n"
         "Welcome to the API service.\n\n"
-        "Choose an option below:",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
+        "Choose an option below:"
     )
 
+    await update.message.reply_text(
+        text,
+        reply_markup=user_menu_keyboard(),
+    )
+
+
+# =========================================================
+# /ADMIN
+# =========================================================
+
+async def admin_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not await owner_only(update):
+        return
+
+    await update.message.reply_text(
+        "👑 ADMIN PANEL\n\n"
+        "Select an option:",
+        reply_markup=admin_menu_keyboard(),
+    )
+
+
+# =========================================================
+# USER CALLBACKS
+# =========================================================
 
 async def plans_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
-
     await query.answer()
 
     await query.edit_message_text(
         "🔑 API PLANS\n\n"
-        "🟢 Basic\n"
+        "🟢 BASIC\n"
         "• 1,000 requests/day\n"
         "• 30 days\n\n"
-        "🔵 Pro\n"
+        "🔵 PRO\n"
         "• 10,000 requests/day\n"
         "• 30 days\n\n"
-        "🟣 Custom\n"
+        "🟣 CUSTOM\n"
         "• 50,000 requests/day\n"
         "• 30 days\n\n"
-        "Access is manually approved by the owner."
+        "Access is manually approved."
     )
 
 
@@ -931,37 +271,33 @@ async def request_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
-
     await query.answer()
 
-    keyboard = [
+    keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🟢 Basic",
                 callback_data="request_basic",
-            )
+            ),
         ],
         [
             InlineKeyboardButton(
                 "🔵 Pro",
                 callback_data="request_pro",
-            )
+            ),
         ],
         [
             InlineKeyboardButton(
                 "🟣 Custom",
                 callback_data="request_custom",
-            )
+            ),
         ],
-    ]
+    ])
 
     await query.edit_message_text(
-        "Select your API plan:",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
+        "🚀 SELECT API PLAN",
+        reply_markup=keyboard,
     )
 
 
@@ -969,29 +305,33 @@ async def submit_request_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
-
     await query.answer()
 
     user = query.from_user
+
+    if database.is_user_blocked(user.id):
+        await query.edit_message_text(
+            "🚫 Your account is blocked."
+        )
+        return
 
     plan = query.data.replace(
         "request_",
         "",
     )
 
-    request_id = create_access_request(
-        user.id,
-        user.username,
-        plan,
+    request_id = (
+        database.create_access_request(
+            user.id,
+            user.username,
+            plan,
+        )
     )
 
     if OWNER_CHAT_ID:
-
         try:
-
-            owner_keyboard = [
+            keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
                         "✅ Approve",
@@ -1006,10 +346,12 @@ async def submit_request_callback(
                         ),
                     ),
                 ]
-            ]
+            ])
 
             await context.bot.send_message(
-                chat_id=int(OWNER_CHAT_ID),
+                chat_id=int(
+                    OWNER_CHAT_ID
+                ),
                 text=(
                     "🔔 NEW API ACCESS REQUEST\n\n"
                     f"Request ID: {request_id}\n"
@@ -1017,20 +359,17 @@ async def submit_request_callback(
                     f"Username: @{user.username or 'none'}\n"
                     f"Plan: {plan.upper()}"
                 ),
-                reply_markup=InlineKeyboardMarkup(
-                    owner_keyboard
-                ),
+                reply_markup=keyboard,
             )
 
         except Exception as exc:
-
             print(
                 "OWNER NOTIFICATION ERROR:",
                 exc,
             )
 
     await query.edit_message_text(
-        "✅ Request submitted.\n\n"
+        "✅ REQUEST SUBMITTED\n\n"
         f"Plan: {plan.upper()}\n"
         f"Request ID: {request_id}\n\n"
         "Please wait for owner approval."
@@ -1041,34 +380,33 @@ async def keys_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
-
     await query.answer()
 
     user = query.from_user
 
-    keys = get_user_keys(user.id)
+    keys = database.get_user_keys(
+        user.id
+    )
 
     if not keys:
-
         await query.edit_message_text(
             "🔐 You don't have any API keys yet."
         )
-
         return
 
     lines = [
-        "🔐 YOUR API KEYS\n"
+        "🔐 YOUR API KEYS",
+        "",
     ]
 
     for key in keys:
-
         lines.append(
+            f"ID: {key['id']}\n"
             f"Plan: {key['plan'].upper()}\n"
             f"Status: {key['status']}\n"
-            f"Expires: {key['expires_at']}\n"
             f"Requests: {key['total_requests']}\n"
+            f"Expires: {key['expires_at']}\n"
         )
 
     await query.edit_message_text(
@@ -1080,33 +418,78 @@ async def usage_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
-
     await query.answer()
 
     user = query.from_user
 
-    keys = get_user_keys(user.id)
+    keys = database.get_user_keys(
+        user.id
+    )
 
     if not keys:
-
         await query.edit_message_text(
             "📊 No API usage found."
         )
-
         return
 
     key = keys[0]
 
+    user_data = database.get_user(
+        user.id
+    )
+
+    api_state = (
+        "🟢 ON"
+        if not user_data
+        or user_data.get(
+            "api_enabled",
+            1,
+        )
+        else "🔴 OFF"
+    )
+
     await query.edit_message_text(
         "📊 API USAGE\n\n"
         f"Plan: {key['plan'].upper()}\n"
+        f"API: {api_state}\n"
+        f"Status: {key['status']}\n"
         f"Today: {key['today_requests']}\n"
         f"Daily Limit: {key['daily_limit']}\n"
         f"Total: {key['total_requests']}\n"
-        f"Status: {key['status']}\n"
         f"Expires: {key['expires_at']}"
+    )
+
+
+async def howto_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    await query.answer()
+
+    base_url = (
+        "https://krutik-cyber-expert-api.onrender.com"
+    )
+
+    await query.edit_message_text(
+        "📖 HOW TO USE API\n\n"
+        "1️⃣ Get your API key after approval.\n\n"
+        "2️⃣ Search endpoint:\n"
+        f"{base_url}/api/search\n\n"
+        "3️⃣ Parameters:\n"
+        "api_key = YOUR_API_KEY\n"
+        "query = YOUR_SEARCH_VALUE\n"
+        "limit = 20\n\n"
+        "Example:\n"
+        f"{base_url}/api/search?"
+        "api_key=YOUR_KEY&"
+        "query=TEST123&"
+        "limit=20\n\n"
+        "4️⃣ The response is JSON.\n\n"
+        "🔐 Keep your API key private.\n\n"
+        "📚 Full documentation:\n"
+        f"{base_url}/docs"
     )
 
 
@@ -1114,54 +497,418 @@ async def docs_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
-
     await query.answer()
 
-    docs_url = (
-        f"https://krutik-cyber-expert-api.onrender.com/docs"
+    url = (
+        "https://krutik-cyber-expert-api.onrender.com/docs"
     )
 
     await query.edit_message_text(
-        "📖 API DOCUMENTATION\n\n"
-        f"{docs_url}\n\n"
-        "Search endpoint:\n"
-        "GET /api/search\n\n"
-        "Parameters:\n"
-        "api_key\n"
-        "query\n"
-        "limit"
+        "📚 API DOCUMENTATION\n\n"
+        f"{url}\n\n"
+        "GET /api/search\n"
+        "GET /api/status\n\n"
+        "Search parameters:\n"
+        "• api_key\n"
+        "• query\n"
+        "• limit"
     )
 
+
+# =========================================================
+# ADMIN CALLBACKS
+# =========================================================
+
+async def admin_callback_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    user = query.from_user
+
+    if not is_owner(user.id):
+        await query.answer(
+            "Owner only.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
+
+    data = query.data
+
+    # -----------------------------------------------------
+    # Dashboard
+    # -----------------------------------------------------
+
+    if data == "admin_dashboard":
+        stats = database.get_usage_stats()
+
+        await query.edit_message_text(
+            "📊 ADMIN DASHBOARD\n\n"
+            f"👥 Users: {stats['users']}\n"
+            f"🚫 Blocked: {stats['blocked']}\n"
+            f"🟢 API ON: {stats['api_enabled']}\n"
+            f"🔴 API OFF: {stats['api_disabled']}\n\n"
+            f"🔑 Total Keys: {stats['keys']}\n"
+            f"🟢 Active Keys: {stats['active_keys']}\n"
+            f"🔒 Revoked: {stats['revoked_keys']}\n"
+            f"⌛ Expired: {stats['expired_keys']}\n\n"
+            f"📨 Pending: {stats['pending']}\n"
+            f"📡 Requests: {stats['requests']}\n"
+            f"✅ Successful: {stats['successful']}\n"
+            f"❌ Failed: {stats['failed']}\n"
+            f"📈 Total Usage: {stats['total_usage']}",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Pending
+    # -----------------------------------------------------
+
+    if data == "admin_pending":
+        requests = database.get_pending_requests()
+
+        if not requests:
+            text = (
+                "📨 PENDING REQUESTS\n\n"
+                "✅ No pending requests."
+            )
+
+        else:
+            text = "📨 PENDING REQUESTS\n\n"
+
+            for req in requests[:15]:
+                text += (
+                    f"ID: {req['id']}\n"
+                    f"User: {req['chat_id']}\n"
+                    f"Plan: {req['plan'].upper()}\n"
+                    f"@{req.get('username') or 'none'}\n\n"
+                )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Users
+    # -----------------------------------------------------
+
+    if data == "admin_users":
+        users = database.get_users(30)
+
+        if not users:
+            text = "👥 USERS\n\nNo users."
+        else:
+            text = "👥 USERS\n\n"
+
+            for u in users:
+                blocked = (
+                    "🚫"
+                    if u.get("blocked")
+                    else "✅"
+                )
+
+                api_state = (
+                    "🟢"
+                    if u.get("api_enabled", 1)
+                    else "🔴"
+                )
+
+                text += (
+                    f"{blocked} {api_state} "
+                    f"ID: {u['chat_id']}\n"
+                    f"Username: "
+                    f"@{u.get('username') or 'none'}\n"
+                    f"Name: "
+                    f"{u.get('first_name') or 'none'}\n\n"
+                )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # API Keys
+    # -----------------------------------------------------
+
+    if data == "admin_keys":
+        keys = database.get_all_keys(50)
+
+        if not keys:
+            text = "🔑 API KEYS\n\nNo API keys."
+        else:
+            text = "🔑 API KEYS\n\n"
+
+            for key in keys[:25]:
+                text += (
+                    f"ID: {key['id']}\n"
+                    f"User: {key['chat_id']}\n"
+                    f"Plan: {key['plan'].upper()}\n"
+                    f"Status: {key['status']}\n"
+                    f"Usage: {key['total_requests']}\n\n"
+                )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Usage
+    # -----------------------------------------------------
+
+    if data == "admin_usage":
+        stats = database.get_usage_stats()
+
+        logs = database.get_recent_logs(10)
+
+        text = (
+            "📈 API USAGE\n\n"
+            f"Total Requests: {stats['requests']}\n"
+            f"Successful: {stats['successful']}\n"
+            f"Failed: {stats['failed']}\n"
+            f"Total Key Usage: {stats['total_usage']}\n\n"
+            "🕘 RECENT REQUESTS\n\n"
+        )
+
+        for log in logs:
+            text += (
+                f"#{log['id']} "
+                f"User: {log.get('chat_id')}\n"
+                f"Query: {log.get('query', '')[:40]}\n"
+                f"Code: {log['status_code']}\n\n"
+            )
+
+        await query.edit_message_text(
+            text[:3900],
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Block
+    # -----------------------------------------------------
+
+    if data == "admin_block":
+        await query.edit_message_text(
+            "🚫 BLOCK USER\n\n"
+            "Use:\n"
+            "/block USER_ID",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Unblock
+    # -----------------------------------------------------
+
+    if data == "admin_unblock":
+        await query.edit_message_text(
+            "✅ UNBLOCK USER\n\n"
+            "Use:\n"
+            "/unblock USER_ID",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # API OFF
+    # -----------------------------------------------------
+
+    if data == "admin_apioff":
+        await query.edit_message_text(
+            "🔴 API OFF\n\n"
+            "Use:\n"
+            "/apioff USER_ID",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # API ON
+    # -----------------------------------------------------
+
+    if data == "admin_apion":
+        await query.edit_message_text(
+            "🟢 API ON\n\n"
+            "Use:\n"
+            "/apion USER_ID",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Revoke
+    # -----------------------------------------------------
+
+    if data == "admin_revoke":
+        await query.edit_message_text(
+            "🔒 REVOKE API\n\n"
+            "Use:\n"
+            "/revoke KEY_ID",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Delete
+    # -----------------------------------------------------
+
+    if data == "admin_delete":
+        await query.edit_message_text(
+            "🗑️ DELETE API\n\n"
+            "Use:\n"
+            "/deleteapi KEY_ID",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Create
+    # -----------------------------------------------------
+
+    if data == "admin_create":
+        await query.edit_message_text(
+            "➕ CREATE API KEY\n\n"
+            "Use:\n"
+            "/createapi USER_ID PLAN\n\n"
+            "Plans:\n"
+            "basic\n"
+            "pro\n"
+            "custom\n\n"
+            "Example:\n"
+            "/createapi 123456789 pro",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Admin Panel",
+                        callback_data="admin_home",
+                    )
+                ]
+            ]),
+        )
+        return
+
+    # -----------------------------------------------------
+    # Home
+    # -----------------------------------------------------
+
+    if data == "admin_home":
+        await query.edit_message_text(
+            "👑 ADMIN PANEL\n\n"
+            "Select an option:",
+            reply_markup=admin_menu_keyboard(),
+        )
+
+
+# =========================================================
+# APPROVE / REJECT
+# =========================================================
 
 async def owner_decision_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     query = update.callback_query
-
-    await query.answer()
-
     user = query.from_user
 
-    if not OWNER_CHAT_ID:
-        return
-
-    if str(user.id) != str(OWNER_CHAT_ID):
-
+    if not is_owner(user.id):
         await query.answer(
             "Owner only.",
             show_alert=True,
         )
-
         return
+
+    await query.answer()
 
     data = query.data
 
     if data.startswith("approve_"):
-
         request_id = int(
             data.replace(
                 "approve_",
@@ -1169,68 +916,71 @@ async def owner_decision_callback(
             )
         )
 
-        request = get_access_request(
+        request = database.get_access_request(
             request_id
         )
 
         if not request:
-
             await query.edit_message_text(
                 "❌ Request not found."
             )
-
             return
 
         if request["status"] != "pending":
-
             await query.edit_message_text(
                 "⚠️ Request already processed."
             )
-
             return
 
-        update_access_request(
+        database.update_access_request(
             request_id,
             "approved",
         )
 
-        raw_key = create_api_key(
-            request["user_id"],
-            request["plan"],
+        database.save_user(
+            request["chat_id"],
+            request.get("username"),
+            "",
+        )
+
+        raw_key, key_id = (
+            database.create_api_key(
+                request["chat_id"],
+                request["plan"],
+            )
         )
 
         try:
-
             await context.bot.send_message(
                 chat_id=int(
-                    request["user_id"]
+                    request["chat_id"]
                 ),
                 text=(
                     "🎉 API ACCESS APPROVED\n\n"
-                    f"Plan: {request['plan'].upper()}\n\n"
-                    "🔑 Your API key:\n\n"
+                    f"Plan: {request['plan'].upper()}\n"
+                    f"Key ID: {key_id}\n\n"
+                    "🔑 YOUR API KEY:\n\n"
                     f"{raw_key}\n\n"
                     "⚠️ Keep this key private.\n\n"
-                    "API Docs:\n"
+                    "📖 How to use:\n"
                     "https://krutik-cyber-expert-api.onrender.com/docs"
                 ),
             )
-
         except Exception as exc:
-
             print(
-                "USER KEY SEND ERROR:",
+                "KEY SEND ERROR:",
                 exc,
             )
 
         await query.edit_message_text(
             "✅ REQUEST APPROVED\n\n"
             f"Request ID: {request_id}\n"
-            f"Plan: {request['plan'].upper()}"
+            f"User: {request['chat_id']}\n"
+            f"Plan: {request['plan'].upper()}\n"
+            f"Key ID: {key_id}"
         )
 
     elif data.startswith("reject_"):
-
         request_id = int(
             data.replace(
                 "reject_",
@@ -1238,39 +988,34 @@ async def owner_decision_callback(
             )
         )
 
-        request = get_access_request(
+        request = database.get_access_request(
             request_id
         )
 
         if not request:
-
             await query.edit_message_text(
                 "❌ Request not found."
             )
-
             return
 
-        update_access_request(
+        database.update_access_request(
             request_id,
             "rejected",
         )
 
         try:
-
             await context.bot.send_message(
                 chat_id=int(
-                    request["user_id"]
+                    request["chat_id"]
                 ),
                 text=(
                     "❌ API ACCESS REQUEST REJECTED\n\n"
                     "You can submit a new request later."
                 ),
             )
-
         except Exception as exc:
-
             print(
-                "REJECT MESSAGE ERROR:",
+                "REJECT SEND ERROR:",
                 exc,
             )
 
@@ -1280,32 +1025,31 @@ async def owner_decision_callback(
         )
 
 
+# =========================================================
+# ADMIN COMMANDS
+# =========================================================
+
 async def stats_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
-    user = update.effective_user
-
-    if not OWNER_CHAT_ID:
+    if not await owner_only(update):
         return
 
-    if str(user.id) != str(OWNER_CHAT_ID):
-
-        await update.message.reply_text(
-            "❌ Owner only."
-        )
-
-        return
-
-    stats = get_stats()
+    stats = database.get_usage_stats()
 
     await update.message.reply_text(
-        "📊 KRUTIK CYBER EXPERT STATS\n\n"
+        "📊 ADMIN STATS\n\n"
         f"Users: {stats['users']}\n"
-        f"API Keys: {stats['keys']}\n"
+        f"Blocked: {stats['blocked']}\n"
+        f"API ON: {stats['api_enabled']}\n"
+        f"API OFF: {stats['api_disabled']}\n"
+        f"Keys: {stats['keys']}\n"
         f"Active Keys: {stats['active_keys']}\n"
-        f"API Requests: {stats['api_requests']}"
+        f"Pending: {stats['pending']}\n"
+        f"Requests: {stats['requests']}\n"
+        f"Successful: {stats['successful']}\n"
+        f"Failed: {stats['failed']}"
     )
 
 
@@ -1313,60 +1057,402 @@ async def pending_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
-    user = update.effective_user
-
-    if not OWNER_CHAT_ID:
+    if not await owner_only(update):
         return
 
-    if str(user.id) != str(OWNER_CHAT_ID):
-
-        await update.message.reply_text(
-            "❌ Owner only."
-        )
-
-        return
-
-    requests = get_pending_requests()
+    requests = database.get_pending_requests()
 
     if not requests:
-
         await update.message.reply_text(
             "✅ No pending requests."
         )
-
         return
 
-    lines = [
-        "🔔 PENDING REQUESTS\n"
-    ]
+    text = "📨 PENDING REQUESTS\n\n"
 
-    for request in requests:
-
-        lines.append(
-            f"ID: {request['id']}\n"
-            f"User: {request['user_id']}\n"
-            f"Plan: {request['plan']}\n"
-            f"Status: {request['status']}\n"
+    for req in requests:
+        text += (
+            f"ID: {req['id']}\n"
+            f"User: {req['chat_id']}\n"
+            f"Plan: {req['plan'].upper()}\n"
+            f"Status: {req['status']}\n\n"
         )
 
     await update.message.reply_text(
-        "\n".join(lines)
+        text[:4000]
+    )
+
+
+async def block_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not await owner_only(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n/block USER_ID"
+        )
+        return
+
+    try:
+        user_id = int(
+            context.args[0]
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid USER_ID."
+        )
+        return
+
+    database.block_user(user_id)
+
+    await update.message.reply_text(
+        f"🚫 User {user_id} blocked."
+    )
+
+
+async def unblock_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not await owner_only(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n/unblock USER_ID"
+        )
+        return
+
+    try:
+        user_id = int(
+            context.args[0]
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid USER_ID."
+        )
+        return
+
+    database.unblock_user(user_id)
+
+    await update.message.reply_text(
+        f"✅ User {user_id} unblocked."
+    )
+
+
+async def apioff_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not await owner_only(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n/apioff USER_ID"
+        )
+        return
+
+    try:
+        user_id = int(
+            context.args[0]
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid USER_ID."
+        )
+        return
+
+    if database.api_off(user_id):
+        await update.message.reply_text(
+            f"🔴 API OFF for {user_id}."
+        )
+    else:
+        await update.message.reply_text(
+            "❌ User not found."
+        )
+
+
+async def apion_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not await owner_only(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n/apion USER_ID"
+        )
+        return
+
+    try:
+        user_id = int(
+            context.args[0]
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid USER_ID."
+        )
+        return
+
+    if database.api_on(user_id):
+        await update.message.reply_text(
+            f"🟢 API ON for {user_id}."
+        )
+    else:
+        await update.message.reply_text(
+            "❌ User not found."
+        )
+
+
+async def revoke_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not await owner_only(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n/revoke KEY_ID"
+        )
+        return
+
+    try:
+        key_id = int(
+            context.args[0]
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid KEY_ID."
+        )
+        return
+
+    if database.revoke_key(key_id):
+        await update.message.reply_text(
+            f"🔒 API key {key_id} revoked."
+        )
+    else:
+        await update.message.reply_text(
+            "❌ API key not found."
+        )
+
+
+async def delete_api_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not await owner_only(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n/deleteapi KEY_ID"
+        )
+        return
+
+    try:
+        key_id = int(
+            context.args[0]
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid KEY_ID."
+        )
+        return
+
+    key = database.get_key_by_id(
+        key_id
+    )
+
+    if not key:
+        await update.message.reply_text(
+            "❌ API key not found."
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🗑️ YES, DELETE",
+                callback_data=(
+                    f"confirm_delete_{key_id}"
+                ),
+            ),
+            InlineKeyboardButton(
+                "❌ CANCEL",
+                callback_data="cancel_delete",
+            ),
+        ]
+    ])
+
+    await update.message.reply_text(
+        "⚠️ DELETE API\n\n"
+        f"Key ID: {key_id}\n"
+        f"User: {key['chat_id']}\n"
+        f"Plan: {key['plan'].upper()}\n"
+        f"Status: {key['status']}\n\n"
+        "Are you sure?",
+        reply_markup=keyboard,
+    )
+
+
+async def create_api_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not await owner_only(update):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/createapi USER_ID PLAN\n\n"
+            "Example:\n"
+            "/createapi 123456789 pro"
+        )
+        return
+
+    try:
+        user_id = int(
+            context.args[0]
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid USER_ID."
+        )
+        return
+
+    plan = context.args[1].lower()
+
+    if plan not in (
+        "basic",
+        "pro",
+        "custom",
+    ):
+        await update.message.reply_text(
+            "❌ Plan must be basic, pro or custom."
+        )
+        return
+
+    database.save_user(
+        user_id,
+        "",
+        "",
+    )
+
+    raw_key, key_id = (
+        database.create_api_key(
+            user_id,
+            plan,
+        )
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🔑 API KEY CREATED BY OWNER\n\n"
+                f"Plan: {plan.upper()}\n"
+                f"Key ID: {key_id}\n\n"
+                f"{raw_key}\n\n"
+                "⚠️ Keep this key private.\n\n"
+                "📖 Docs:\n"
+                "https://krutik-cyber-expert-api.onrender.com/docs"
+            ),
+        )
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        "✅ API KEY CREATED\n\n"
+        f"User: {user_id}\n"
+        f"Plan: {plan.upper()}\n"
+        f"Key ID: {key_id}\n\n"
+        f"API Key:\n{raw_key}"
     )
 
 
 # =========================================================
-# FASTAPI SERVER THREAD
+# DELETE CONFIRMATION CALLBACK
+# =========================================================
+
+async def delete_confirmation_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    user = query.from_user
+
+    if not is_owner(user.id):
+        await query.answer(
+            "Owner only.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
+
+    data = query.data
+
+    if data == "cancel_delete":
+        await query.edit_message_text(
+            "❌ Delete cancelled."
+        )
+        return
+
+    if data.startswith(
+        "confirm_delete_"
+    ):
+        key_id = int(
+            data.replace(
+                "confirm_delete_",
+                "",
+            )
+        )
+
+        key = database.get_key_by_id(
+            key_id
+        )
+
+        if not key:
+            await query.edit_message_text(
+                "❌ API key already deleted."
+            )
+            return
+
+        deleted = database.delete_key(
+            key_id
+        )
+
+        if deleted:
+            await query.edit_message_text(
+                "🗑️ API DELETED\n\n"
+                f"Key ID: {key_id}\n"
+                f"User: {key['chat_id']}\n"
+                f"Plan: {key['plan'].upper()}"
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Delete failed."
+            )
+
+
+# =========================================================
+# API SERVER
 # =========================================================
 
 def run_api():
-
     print(
-        f"Starting FastAPI on port {PORT}"
+        f"🌐 FastAPI starting on port {PORT}"
     )
 
     uvicorn.run(
-        app,
+        fastapi_app,
         host="0.0.0.0",
         port=PORT,
         log_level="info",
@@ -1378,28 +1464,21 @@ def run_api():
 # =========================================================
 
 def main():
-
-    print("=" * 50)
+    print("=" * 55)
     print(APP_NAME)
-    print("=" * 50)
+    print("Telegram Bot + FastAPI + Admin Panel")
+    print("=" * 55)
 
-    init_db()
-
-    DATA_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    database.init_db()
 
     if not BOT_TOKEN:
-
         raise RuntimeError(
             "BOT_TOKEN environment variable is missing."
         )
 
     if not OWNER_CHAT_ID:
-
         print(
-            "WARNING: OWNER_CHAT_ID is not configured."
+            "⚠️ WARNING: OWNER_CHAT_ID is not configured."
         )
 
     api_thread = threading.Thread(
@@ -1415,10 +1494,18 @@ def main():
         .build()
     )
 
+    # Commands
     telegram_app.add_handler(
         CommandHandler(
             "start",
             start_command,
+        )
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "admin",
+            admin_command,
         )
     )
 
@@ -1437,6 +1524,56 @@ def main():
     )
 
     telegram_app.add_handler(
+        CommandHandler(
+            "block",
+            block_command,
+        )
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "unblock",
+            unblock_command,
+        )
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "apioff",
+            apioff_command,
+        )
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "apion",
+            apion_command,
+        )
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "revoke",
+            revoke_command,
+        )
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "deleteapi",
+            delete_api_command,
+        )
+    )
+
+    telegram_app.add_handler(
+        CommandHandler(
+            "createapi",
+            create_api_command,
+        )
+    )
+
+    # User callbacks
+    telegram_app.add_handler(
         CallbackQueryHandler(
             plans_callback,
             pattern="^plans$",
@@ -1453,7 +1590,10 @@ def main():
     telegram_app.add_handler(
         CallbackQueryHandler(
             submit_request_callback,
-            pattern="^request_(basic|pro|custom)$",
+            pattern=(
+                "^request_"
+                "(basic|pro|custom)$"
+            ),
         )
     )
 
@@ -1473,20 +1613,49 @@ def main():
 
     telegram_app.add_handler(
         CallbackQueryHandler(
-            docs_callback,
-            pattern="^docs$",
+            howto_callback,
+            pattern="^howto$",
         )
     )
 
     telegram_app.add_handler(
         CallbackQueryHandler(
+            docs_callback,
+            pattern="^docs$",
+        )
+    )
+
+    # Admin panel
+    telegram_app.add_handler(
+        CallbackQueryHandler(
+            admin_callback_router,
+            pattern="^admin_",
+        )
+    )
+
+    # Approve / reject
+    telegram_app.add_handler(
+        CallbackQueryHandler(
             owner_decision_callback,
-            pattern="^(approve|reject)_\d+$",
+            pattern=(
+                "^(approve|reject)_\\d+$"
+            ),
+        )
+    )
+
+    # Delete confirmation
+    telegram_app.add_handler(
+        CallbackQueryHandler(
+            delete_confirmation_callback,
+            pattern=(
+                "^(confirm_delete_\\d+|"
+                "cancel_delete)$"
+            ),
         )
     )
 
     print(
-        "Telegram bot starting..."
+        "🤖 Telegram bot starting..."
     )
 
     telegram_app.run_polling(
