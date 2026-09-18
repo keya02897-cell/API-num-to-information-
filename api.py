@@ -17,10 +17,14 @@ DATA_DIR = Path(
 
 app = FastAPI(
     title=APP_NAME,
-    version="1.0.0",
+    version="2.0.0",
     description="Authorized synthetic-data API",
 )
 
+
+# =========================================================
+# DATA
+# =========================================================
 
 def load_records():
     records = []
@@ -59,12 +63,14 @@ def load_records():
 
 
 def search_records(search_value, limit):
-    search_value = search_value.strip().lower()
-
-    records = load_records()
+    search_value = (
+        search_value.strip().lower()
+    )
 
     if not search_value:
         return []
+
+    records = load_records()
 
     results = []
 
@@ -78,9 +84,7 @@ def search_records(search_value, limit):
     ]
 
     for record in records:
-
         for field in fields:
-
             value = record.get(field)
 
             if value is None:
@@ -96,25 +100,40 @@ def search_records(search_value, limit):
     return results
 
 
+# =========================================================
+# BASIC ROUTES
+# =========================================================
+
 @app.get("/")
 async def root():
     return {
         "service": APP_NAME,
         "status": "online",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "docs": "/docs",
+        "search": "/api/search",
+        "status_endpoint": "/api/status",
     }
 
 
 @app.get("/health")
 async def health():
+    database.init_db()
+
     return {
         "status": "ok",
         "service": APP_NAME,
+        "database": "sqlite",
+        "data_directory": str(DATA_DIR),
         "time": datetime.now(
             timezone.utc
         ).isoformat(),
     }
 
+
+# =========================================================
+# SEARCH API
+# =========================================================
 
 @app.get("/api/search")
 async def search_api(
@@ -141,40 +160,45 @@ async def search_api(
             },
         )
 
-    if key["expires_at"]:
-        try:
-            expires = datetime.fromisoformat(
-                key["expires_at"]
-            )
-
-            if expires < datetime.now(timezone.utc):
-
-                database.log_request(
-                    key["id"],
-                    query,
-                    False,
-                    403,
-                )
-
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "success": False,
-                        "error": "api_key_expired",
-                    },
-                )
-
-        except ValueError:
-            pass
-
     allowed, reason, updated_key = (
         database.consume_api_request(api_key)
     )
 
     if not allowed:
 
-        if reason == "daily_limit":
+        if reason == "blocked":
+            database.log_request(
+                key["id"],
+                query,
+                False,
+                403,
+            )
 
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "success": False,
+                    "error": "user_blocked",
+                },
+            )
+
+        if reason == "api_disabled":
+            database.log_request(
+                key["id"],
+                query,
+                False,
+                403,
+            )
+
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "success": False,
+                    "error": "api_access_disabled",
+                },
+            )
+
+        if reason == "daily_limit":
             database.log_request(
                 key["id"],
                 query,
@@ -190,6 +214,22 @@ async def search_api(
                     "daily_limit": key[
                         "daily_limit"
                     ],
+                },
+            )
+
+        if reason == "expired":
+            database.log_request(
+                key["id"],
+                query,
+                False,
+                403,
+            )
+
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "success": False,
+                    "error": "api_key_expired",
                 },
             )
 
@@ -232,6 +272,10 @@ async def search_api(
     }
 
 
+# =========================================================
+# API STATUS
+# =========================================================
+
 @app.get("/api/status")
 async def api_status(
     api_key: str = Query(...),
@@ -247,10 +291,46 @@ async def api_status(
             },
         )
 
+    user = database.get_user(
+        key["chat_id"]
+    )
+
+    if user and user.get("blocked"):
+        return {
+            "success": True,
+            "plan": key["plan"],
+            "status": key["status"],
+            "api_enabled": False,
+            "blocked": True,
+            "today_requests": key[
+                "today_requests"
+            ],
+            "daily_limit": key[
+                "daily_limit"
+            ],
+            "total_requests": key[
+                "total_requests"
+            ],
+            "expires_at": key[
+                "expires_at"
+            ],
+        }
+
     return {
         "success": True,
         "plan": key["plan"],
         "status": key["status"],
+        "api_enabled": (
+            True
+            if not user
+            else bool(
+                user.get(
+                    "api_enabled",
+                    1,
+                )
+            )
+        ),
+        "blocked": False,
         "today_requests": key[
             "today_requests"
         ],
@@ -260,9 +340,15 @@ async def api_status(
         "total_requests": key[
             "total_requests"
         ],
-        "expires_at": key["expires_at"],
+        "expires_at": key[
+            "expires_at"
+        ],
     }
 
+
+# =========================================================
+# PUBLIC STATS
+# =========================================================
 
 @app.get("/api/stats")
 async def public_stats():
@@ -275,12 +361,14 @@ async def public_stats():
 if __name__ == "__main__":
     import uvicorn
 
+    database.init_db()
+
     port = int(
         os.getenv("PORT", "10000")
     )
 
     uvicorn.run(
-        "api:app",
+        app,
         host="0.0.0.0",
         port=port,
     )
