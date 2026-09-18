@@ -1,1 +1,26 @@
-
+[
+  {
+    "id": "FAKE-000001",
+    "mobile": "9000000001",
+    "name": "Demo User 001",
+    "pincode": "380001",
+    "city": "Ahmedabad",
+    "address": "Synthetic Demo Address 001"
+  },
+  {
+    "id": "FAKE-000002",
+    "mobile": "9000000002",
+    "name": "Demo User 002",
+    "pincode": "380002",
+    "city": "Ahmedabad",
+    "address": "Synthetic Demo Address 002"
+  },
+  {
+    "id": "FAKE-000003",
+    "mobile": "9000000003",
+    "name": "Demo User 003",
+    "pincode": "380003",
+    "city": "Ahmedabad",
+    "address": "Synthetic Demo Address 003"
+  }
+]
