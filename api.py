@@ -11,15 +11,53 @@ import database
 
 APP_NAME = "KRUTIK CYBER EXPERT API"
 
+VERSION = "2.0.0"
+
 DATA_DIR = Path(
     os.getenv("DATA_DIR", "data")
 )
 
+
 app = FastAPI(
     title=APP_NAME,
-    version="2.0.0",
-    description="Authorized synthetic-data API",
+    version=VERSION,
+    description=(
+        "KRUTIK CYBER EXPERT API - "
+        "Authorized synthetic-data API"
+    ),
 )
+
+
+# =========================================================
+# RESPONSE HELPERS
+# =========================================================
+
+def success_response(**data):
+    return {
+        "service": APP_NAME,
+        "success": True,
+        **data,
+    }
+
+
+def error_response(
+    status_code,
+    error,
+    message,
+    **extra,
+):
+    content = {
+        "service": APP_NAME,
+        "success": False,
+        "error": error,
+        "message": message,
+        **extra,
+    }
+
+    return JSONResponse(
+        status_code=status_code,
+        content=content,
+    )
 
 
 # =========================================================
@@ -29,10 +67,14 @@ app = FastAPI(
 def load_records():
     records = []
 
-    if not DATA_DIR.exists():
-        return records
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    for file_path in sorted(DATA_DIR.glob("*.json")):
+    for file_path in sorted(
+        DATA_DIR.glob("*.json")
+    ):
         try:
             with open(
                 file_path,
@@ -56,23 +98,28 @@ def load_records():
 
         except Exception as exc:
             print(
-                f"JSON LOAD ERROR: {file_path}: {exc}"
+                "JSON LOAD ERROR:",
+                file_path,
+                exc,
             )
 
     return records
 
 
-def search_records(search_value, limit):
+def search_records(
+    search_value,
+    limit,
+):
     search_value = (
-        search_value.strip().lower()
+        str(search_value)
+        .strip()
+        .lower()
     )
 
     if not search_value:
         return []
 
     records = load_records()
-
-    results = []
 
     fields = [
         "id",
@@ -83,6 +130,8 @@ def search_records(search_value, limit):
         "address",
     ]
 
+    results = []
+
     for record in records:
         for field in fields:
             value = record.get(field)
@@ -90,7 +139,9 @@ def search_records(search_value, limit):
             if value is None:
                 continue
 
-            if search_value in str(value).lower():
+            if search_value in str(
+                value
+            ).lower():
                 results.append(record)
                 break
 
@@ -101,43 +152,45 @@ def search_records(search_value, limit):
 
 
 # =========================================================
-# BASIC ROUTES
+# ROOT
 # =========================================================
 
 @app.get("/")
 async def root():
-    return {
-        "service": APP_NAME,
-        "status": "online",
-        "version": "2.0.0",
-        "docs": "/docs",
-        "search": "/api/search",
-        "status_endpoint": "/api/status",
-    }
+    return success_response(
+        status="online",
+        version=VERSION,
+        docs="/docs",
+        health="/health",
+        search_endpoint="/api/search",
+        status_endpoint="/api/status",
+        stats_endpoint="/api/stats",
+    )
 
 
 @app.get("/health")
 async def health():
-    database.init_db()
-
-    return {
-        "status": "ok",
-        "service": APP_NAME,
-        "database": "sqlite",
-        "data_directory": str(DATA_DIR),
-        "time": datetime.now(
+    return success_response(
+        status="ok",
+        version=VERSION,
+        database="sqlite",
+        data_directory=str(DATA_DIR),
+        time=datetime.now(
             timezone.utc
         ).isoformat(),
-    }
+    )
 
 
 # =========================================================
-# SEARCH API
+# SEARCH
 # =========================================================
 
 @app.get("/api/search")
-async def search_api(
-    api_key: str = Query(...),
+async def api_search(
+    api_key: str = Query(
+        ...,
+        min_length=1,
+    ),
     query: str = Query(
         ...,
         min_length=1,
@@ -149,96 +202,90 @@ async def search_api(
         le=50,
     ),
 ):
-    key = database.get_api_key(api_key)
+    key = database.get_api_key(
+        api_key
+    )
 
     if not key:
-        return JSONResponse(
-            status_code=401,
-            content={
-                "success": False,
-                "error": "invalid_api_key",
-            },
+        return error_response(
+            401,
+            "invalid_api_key",
+            "The API key is invalid.",
         )
 
     allowed, reason, updated_key = (
-        database.consume_api_request(api_key)
+        database.consume_api_request(
+            api_key
+        )
     )
 
     if not allowed:
 
-        if reason == "blocked":
-            database.log_request(
-                key["id"],
-                query,
-                False,
+        errors = {
+            "user_blocked": (
                 403,
-            )
-
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "success": False,
-                    "error": "user_blocked",
-                },
-            )
-
-        if reason == "api_disabled":
-            database.log_request(
-                key["id"],
-                query,
-                False,
+                "user_blocked",
+                "This user is blocked.",
+            ),
+            "api_access_disabled": (
                 403,
-            )
-
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "success": False,
-                    "error": "api_access_disabled",
-                },
-            )
-
-        if reason == "daily_limit":
-            database.log_request(
-                key["id"],
-                query,
-                False,
+                "api_access_disabled",
+                "API access is disabled for this user.",
+            ),
+            "maintenance_mode": (
+                503,
+                "maintenance_mode",
+                "API is temporarily disabled.",
+            ),
+            "not_started": (
+                403,
+                "api_not_started",
+                "This API key is not active yet.",
+            ),
+            "expired": (
+                403,
+                "api_key_expired",
+                "This API key has expired.",
+            ),
+            "daily_limit": (
                 429,
-            )
+                "daily_limit_reached",
+                "Daily request limit reached.",
+            ),
+            "total_limit": (
+                429,
+                "total_limit_reached",
+                "Total request limit reached.",
+            ),
+            "rate_limit": (
+                429,
+                "rate_limit_reached",
+                "Requests per minute limit reached.",
+            ),
+        }
 
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "success": False,
-                    "error": "daily_limit_reached",
-                    "daily_limit": key[
-                        "daily_limit"
-                    ],
-                },
-            )
+        status, error, message = errors.get(
+            reason,
+            (
+                401,
+                "invalid_api_key",
+                "The API key is invalid.",
+            ),
+        )
 
-        if reason == "expired":
-            database.log_request(
-                key["id"],
-                query,
-                False,
-                403,
-            )
+        database.log_request(
+            key["id"],
+            key["chat_id"],
+            query,
+            False,
+            status,
+            error,
+        )
 
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "success": False,
-                    "error": "api_key_expired",
-                },
-            )
-
-        return JSONResponse(
-            status_code=401,
-            content={
-                "success": False,
-                "error": "invalid_api_key",
-            },
+        return error_response(
+            status,
+            error,
+            message,
         )
 
     results = search_records(
@@ -248,127 +295,133 @@ async def search_api(
 
     database.log_request(
         updated_key["id"],
+        updated_key["chat_id"],
         query,
         True,
         200,
     )
 
-    return {
-        "success": True,
-        "query": query,
-        "count": len(results),
-        "usage": {
+    remaining_daily = max(
+        0,
+        updated_key["daily_limit"]
+        - updated_key["today_requests"],
+    )
+
+    if updated_key.get("total_limit") is None:
+        remaining_total = None
+    else:
+        remaining_total = max(
+            0,
+            updated_key["total_limit"]
+            - updated_key["total_requests"],
+        )
+
+    return success_response(
+        status="success",
+        query=query,
+        count=len(results),
+        key={
+            "id": updated_key["id"],
+            "name": updated_key["key_name"],
+            "plan": updated_key["plan"],
+        },
+        usage={
             "today": updated_key[
                 "today_requests"
             ],
             "daily_limit": updated_key[
                 "daily_limit"
             ],
+            "daily_remaining": remaining_daily,
             "total": updated_key[
                 "total_requests"
             ],
+            "total_limit": updated_key[
+                "total_limit"
+            ],
+            "total_remaining": remaining_total,
         },
-        "results": results,
-    }
+        results=results,
+    )
 
 
 # =========================================================
-# API STATUS
+# STATUS
 # =========================================================
 
 @app.get("/api/status")
 async def api_status(
-    api_key: str = Query(...),
+    api_key: str = Query(
+        ...,
+        min_length=1,
+    ),
 ):
-    key = database.get_api_key(api_key)
-
-    if not key:
-        return JSONResponse(
-            status_code=401,
-            content={
-                "success": False,
-                "error": "invalid_api_key",
-            },
-        )
-
-    user = database.get_user(
-        key["chat_id"]
+    key = database.get_api_key(
+        api_key
     )
 
-    if user and user.get("blocked"):
-        return {
-            "success": True,
+    if not key:
+        return error_response(
+            401,
+            "invalid_api_key",
+            "The API key is invalid.",
+        )
+
+    return success_response(
+        status=key["status"],
+        key={
+            "id": key["id"],
+            "name": key["key_name"],
             "plan": key["plan"],
-            "status": key["status"],
-            "api_enabled": False,
-            "blocked": True,
-            "today_requests": key[
+        },
+        limits={
+            "daily": key["daily_limit"],
+            "total": key["total_limit"],
+            "rate_per_minute": key[
+                "rate_limit"
+            ],
+        },
+        usage={
+            "today": key[
                 "today_requests"
             ],
-            "daily_limit": key[
-                "daily_limit"
-            ],
-            "total_requests": key[
+            "total": key[
                 "total_requests"
             ],
-            "expires_at": key[
-                "expires_at"
-            ],
-        }
-
-    return {
-        "success": True,
-        "plan": key["plan"],
-        "status": key["status"],
-        "api_enabled": (
-            True
-            if not user
-            else bool(
-                user.get(
-                    "api_enabled",
-                    1,
-                )
-            )
-        ),
-        "blocked": False,
-        "today_requests": key[
-            "today_requests"
+        },
+        start_at=key["start_at"],
+        expires_at=key["expires_at"],
+        last_used_at=key[
+            "last_used_at"
         ],
-        "daily_limit": key[
-            "daily_limit"
-        ],
-        "total_requests": key[
-            "total_requests"
-        ],
-        "expires_at": key[
-            "expires_at"
-        ],
-    }
+    )
 
 
 # =========================================================
-# PUBLIC STATS
+# STATS
 # =========================================================
 
 @app.get("/api/stats")
-async def public_stats():
-    return {
-        "service": APP_NAME,
-        "status": "online",
-    }
+async def api_stats():
+    return success_response(
+        status="online",
+        version=VERSION,
+        global_api_enabled=(
+            database.is_global_api_enabled()
+        ),
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    database.init_db()
-
-    port = int(
-        os.getenv("PORT", "10000")
-    )
-
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=port,
+        port=int(
+            os.getenv(
+                "PORT",
+                "10000",
+            )
+        ),
     )
