@@ -3,33 +3,28 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Header
 from fastapi.responses import JSONResponse
 
 import database
 
 
 APP_NAME = "KRUTIK CYBER EXPERT API"
-
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 
 DATA_DIR = Path(
     os.getenv("DATA_DIR", "data")
 )
 
-
 app = FastAPI(
     title=APP_NAME,
     version=VERSION,
-    description=(
-        "KRUTIK CYBER EXPERT API - "
-        "Authorized synthetic-data API"
-    ),
+    description="Authorized synthetic-data API",
 )
 
 
 # =========================================================
-# RESPONSE HELPERS
+# HELPERS
 # =========================================================
 
 def success_response(**data):
@@ -46,23 +41,41 @@ def error_response(
     message,
     **extra,
 ):
-    content = {
-        "service": APP_NAME,
-        "success": False,
-        "error": error,
-        "message": message,
-        **extra,
-    }
-
     return JSONResponse(
         status_code=status_code,
-        content=content,
+        content={
+            "service": APP_NAME,
+            "success": False,
+            "error": error,
+            "message": message,
+            **extra,
+        },
     )
 
 
 # =========================================================
-# DATA
+# DATA LOADER
 # =========================================================
+
+def normalize_json_data(data):
+    records = []
+
+    if isinstance(data, list):
+        source = data
+
+    elif isinstance(data, dict):
+        source = data.get("data", [])
+
+    else:
+        source = []
+
+    if isinstance(source, list):
+        for item in source:
+            if isinstance(item, dict):
+                records.append(item)
+
+    return records
+
 
 def load_records():
     records = []
@@ -72,9 +85,11 @@ def load_records():
         exist_ok=True,
     )
 
-    for file_path in sorted(
+    json_files = sorted(
         DATA_DIR.glob("*.json")
-    ):
+    )
+
+    for file_path in json_files:
         try:
             with open(
                 file_path,
@@ -83,18 +98,19 @@ def load_records():
             ) as file:
                 data = json.load(file)
 
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict):
-                        records.append(item)
+            file_records = normalize_json_data(
+                data
+            )
 
-            elif isinstance(data, dict):
-                data_list = data.get("data")
+            for record in file_records:
+                record = dict(record)
 
-                if isinstance(data_list, list):
-                    for item in data_list:
-                        if isinstance(item, dict):
-                            records.append(item)
+                # Dataset information
+                record["_dataset"] = (
+                    file_path.name
+                )
+
+                records.append(record)
 
         except Exception as exc:
             print(
@@ -110,45 +126,65 @@ def search_records(
     search_value,
     limit,
 ):
-    search_value = (
+    value = (
         str(search_value)
         .strip()
         .lower()
     )
 
-    if not search_value:
+    if not value:
         return []
 
     records = load_records()
 
-    fields = [
-        "id",
-        "mobile",
-        "name",
-        "pincode",
-        "city",
-        "address",
-    ]
-
     results = []
 
     for record in records:
-        for field in fields:
-            value = record.get(field)
 
-            if value is None:
+        matched = False
+
+        # Search every field dynamically
+        for field_value in record.values():
+
+            if field_value is None:
                 continue
 
-            if search_value in str(
-                value
-            ).lower():
-                results.append(record)
+            if isinstance(
+                field_value,
+                (dict, list),
+            ):
+                try:
+                    text = json.dumps(
+                        field_value,
+                        ensure_ascii=False,
+                    )
+                except Exception:
+                    text = str(field_value)
+            else:
+                text = str(field_value)
+
+            if value in text.lower():
+                matched = True
                 break
+
+        if matched:
+            results.append(record)
 
         if len(results) >= limit:
             break
 
     return results
+
+
+def authenticate(
+    api_key,
+    header_key,
+):
+    return (
+        api_key
+        or header_key
+        or ""
+    ).strip()
 
 
 # =========================================================
@@ -164,7 +200,6 @@ async def root():
         health="/health",
         search_endpoint="/api/search",
         status_endpoint="/api/status",
-        stats_endpoint="/api/stats",
     )
 
 
@@ -175,6 +210,9 @@ async def health():
         version=VERSION,
         database="sqlite",
         data_directory=str(DATA_DIR),
+        json_files=len(
+            list(DATA_DIR.glob("*.json"))
+        ),
         time=datetime.now(
             timezone.utc
         ).isoformat(),
@@ -188,8 +226,8 @@ async def health():
 @app.get("/api/search")
 async def api_search(
     api_key: str = Query(
-        ...,
-        min_length=1,
+        "",
+        min_length=0,
     ),
     query: str = Query(
         ...,
@@ -199,11 +237,20 @@ async def api_search(
     limit: int = Query(
         20,
         ge=1,
-        le=50,
+        le=100,
+    ),
+    x_api_key: str | None = Header(
+        default=None,
+        alias="X-API-Key",
     ),
 ):
+    raw_key = authenticate(
+        api_key,
+        x_api_key,
+    )
+
     key = database.get_api_key(
-        api_key
+        raw_key
     )
 
     if not key:
@@ -215,7 +262,7 @@ async def api_search(
 
     allowed, reason, updated_key = (
         database.consume_api_request(
-            api_key
+            raw_key
         )
     )
 
@@ -230,7 +277,7 @@ async def api_search(
             "api_access_disabled": (
                 403,
                 "api_access_disabled",
-                "API access is disabled for this user.",
+                "API access is disabled.",
             ),
             "maintenance_mode": (
                 503,
@@ -240,12 +287,12 @@ async def api_search(
             "not_started": (
                 403,
                 "api_not_started",
-                "This API key is not active yet.",
+                "API key is not active yet.",
             ),
             "expired": (
                 403,
                 "api_key_expired",
-                "This API key has expired.",
+                "API key has expired.",
             ),
             "daily_limit": (
                 429,
@@ -269,7 +316,7 @@ async def api_search(
             (
                 401,
                 "invalid_api_key",
-                "The API key is invalid.",
+                "Invalid API key.",
             ),
         )
 
@@ -307,7 +354,9 @@ async def api_search(
         - updated_key["today_requests"],
     )
 
-    if updated_key.get("total_limit") is None:
+    if updated_key.get(
+        "total_limit"
+    ) is None:
         remaining_total = None
     else:
         remaining_total = max(
@@ -352,12 +401,20 @@ async def api_search(
 @app.get("/api/status")
 async def api_status(
     api_key: str = Query(
-        ...,
-        min_length=1,
+        "",
+    ),
+    x_api_key: str | None = Header(
+        default=None,
+        alias="X-API-Key",
     ),
 ):
+    raw_key = authenticate(
+        api_key,
+        x_api_key,
+    )
+
     key = database.get_api_key(
-        api_key
+        raw_key
     )
 
     if not key:
@@ -408,6 +465,9 @@ async def api_stats():
         version=VERSION,
         global_api_enabled=(
             database.is_global_api_enabled()
+        ),
+        json_files=len(
+            list(DATA_DIR.glob("*.json"))
         ),
     )
 
