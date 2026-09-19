@@ -40,10 +40,6 @@ PORT = int(
     )
 )
 
-API_URL = (
-    "https://krutik-cyber-expert-api.onrender.com"
-)
-
 
 # =========================================================
 # HELPERS
@@ -70,13 +66,15 @@ async def owner_only(update):
     return True
 
 
-def back_button():
-    return [
-        InlineKeyboardButton(
-            "🔙 Back",
-            callback_data="home",
-        )
-    ]
+def back_markup():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔙 Back",
+                callback_data="home",
+            )
+        ]
+    ])
 
 
 # =========================================================
@@ -87,38 +85,65 @@ def user_menu():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "🔑 API Plans",
+                database.get_setting(
+                    "button_plans",
+                    "🔑 API Plans",
+                ),
                 callback_data="plans",
             )
         ],
         [
             InlineKeyboardButton(
-                "🚀 Request API Access",
+                database.get_setting(
+                    "button_request",
+                    "🚀 Request API Access",
+                ),
                 callback_data="request",
             )
         ],
         [
             InlineKeyboardButton(
-                "🔐 My API Keys",
+                database.get_setting(
+                    "button_keys",
+                    "🔐 My API Keys",
+                ),
                 callback_data="keys",
             )
         ],
         [
             InlineKeyboardButton(
-                "📊 My Usage",
+                database.get_setting(
+                    "button_usage",
+                    "📊 My Usage",
+                ),
                 callback_data="usage",
             )
         ],
         [
             InlineKeyboardButton(
-                "📖 How to Use API",
+                database.get_setting(
+                    "button_howto",
+                    "📖 How to Use API",
+                ),
                 callback_data="howto",
             )
         ],
         [
             InlineKeyboardButton(
-                "📚 API Docs",
+                database.get_setting(
+                    "button_docs",
+                    "📚 API Docs",
+                ),
                 callback_data="docs",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                database.get_setting(
+                    "button_support",
+                    "🆘 Support",
+                ),
+                callback_data="support",
             )
         ],
     ])
@@ -138,7 +163,7 @@ def admin_menu():
         ],
         [
             InlineKeyboardButton(
-                "📨 Pending Requests",
+                "📨 Requests",
                 callback_data="admin_pending",
             )
         ],
@@ -146,28 +171,30 @@ def admin_menu():
             InlineKeyboardButton(
                 "👥 Users",
                 callback_data="admin_users",
-            )
+            ),
         ],
         [
             InlineKeyboardButton(
                 "🔑 API Keys",
                 callback_data="admin_keys",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📈 API Usage",
-                callback_data="admin_usage",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🚫 Block User",
-                callback_data="admin_block",
             ),
+        ],
+        [
             InlineKeyboardButton(
-                "✅ Unblock User",
-                callback_data="admin_unblock",
+                "📈 Usage",
+                callback_data="admin_usage",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎨 Customize Panel",
+                callback_data="admin_customize",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⚙️ API Settings",
+                callback_data="admin_settings",
             ),
         ],
         [
@@ -182,24 +209,6 @@ def admin_menu():
         ],
         [
             InlineKeyboardButton(
-                "🔒 Revoke API",
-                callback_data="admin_revoke",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🗑️ Delete API",
-                callback_data="admin_delete",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "➕ Create API Key",
-                callback_data="admin_create",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
                 "📖 API Docs",
                 callback_data="admin_docs",
             )
@@ -208,7 +217,7 @@ def admin_menu():
 
 
 # =========================================================
-# /START
+# START
 # =========================================================
 
 async def start_command(
@@ -227,25 +236,21 @@ async def start_command(
         user.id
     ):
         await update.message.reply_text(
-            f"🚫 {APP_NAME}\n\n"
-            "Your access has been blocked."
+            "🚫 Access blocked."
         )
         return
 
-    text = (
-        f"🔥 {APP_NAME}\n\n"
-        "Welcome!\n\n"
-        "Choose an option below:"
-    )
-
     await update.message.reply_text(
-        text,
+        database.get_setting(
+            "welcome_text",
+            "Welcome!",
+        ),
         reply_markup=user_menu(),
     )
 
 
 # =========================================================
-# /ADMIN
+# ADMIN
 # =========================================================
 
 async def admin_command(
@@ -256,9 +261,8 @@ async def admin_command(
         return
 
     await update.message.reply_text(
-        f"👑 {APP_NAME}\n"
-        "ADMIN PANEL\n\n"
-        "Choose an option:",
+        f"👑 {APP_NAME}\n\n"
+        "ADMIN PANEL",
         reply_markup=admin_menu(),
     )
 
@@ -274,23 +278,54 @@ async def plans_callback(
     query = update.callback_query
     await query.answer()
 
-    await query.edit_message_text(
-        f"🔑 {APP_NAME}\n"
+    basic_daily = database.get_setting(
+        "basic_daily",
+        "1000",
+    )
+
+    basic_days = database.get_setting(
+        "basic_days",
+        "30",
+    )
+
+    pro_daily = database.get_setting(
+        "pro_daily",
+        "10000",
+    )
+
+    pro_days = database.get_setting(
+        "pro_days",
+        "30",
+    )
+
+    custom_daily = database.get_setting(
+        "custom_daily",
+        "50000",
+    )
+
+    custom_days = database.get_setting(
+        "custom_days",
+        "30",
+    )
+
+    text = (
+        f"🔑 {APP_NAME}\n\n"
         "API PLANS\n\n"
-        "🟢 BASIC\n"
-        "• 1,000 requests/day\n"
-        "• 30 days\n\n"
-        "🔵 PRO\n"
-        "• 10,000 requests/day\n"
-        "• 30 days\n\n"
-        "🟣 CUSTOM\n"
-        "• Custom limits\n"
-        "• Custom expiry\n"
-        "• Custom rate limit\n\n"
-        "Access requires owner approval.",
-        reply_markup=InlineKeyboardMarkup([
-            back_button()
-        ]),
+        f"🟢 BASIC\n"
+        f"• {basic_daily} requests/day\n"
+        f"• {basic_days} days\n\n"
+        f"🔵 PRO\n"
+        f"• {pro_daily} requests/day\n"
+        f"• {pro_days} days\n\n"
+        f"🟣 CUSTOM\n"
+        f"• {custom_daily} requests/day\n"
+        f"• {custom_days} days\n\n"
+        "Access requires owner approval."
+    )
+
+    await query.edit_message_text(
+        text,
+        reply_markup=back_markup(),
     )
 
 
@@ -320,12 +355,16 @@ async def request_callback(
                 callback_data="request_custom",
             )
         ],
-        back_button(),
+        [
+            InlineKeyboardButton(
+                "🔙 Back",
+                callback_data="home",
+            )
+        ],
     ]
 
     await query.edit_message_text(
-        f"🚀 {APP_NAME}\n\n"
-        "Select API plan:",
+        "🚀 Select API plan:",
         reply_markup=InlineKeyboardMarkup(
             keyboard
         ),
@@ -374,8 +413,8 @@ async def submit_request_callback(
             await context.bot.send_message(
                 chat_id=int(OWNER_CHAT_ID),
                 text=(
-                    f"🔔 {APP_NAME}\n"
-                    "NEW ACCESS REQUEST\n\n"
+                    f"🔔 {APP_NAME}\n\n"
+                    "NEW API REQUEST\n\n"
                     f"Request ID: {request_id}\n"
                     f"User ID: {user.id}\n"
                     f"Username: "
@@ -394,14 +433,11 @@ async def submit_request_callback(
             )
 
     await query.edit_message_text(
-        f"✅ {APP_NAME}\n\n"
-        "Request submitted.\n\n"
+        f"✅ Request submitted.\n\n"
         f"Request ID: {request_id}\n"
         f"Plan: {plan.upper()}\n\n"
         "Please wait for owner approval.",
-        reply_markup=InlineKeyboardMarkup([
-            back_button()
-        ]),
+        reply_markup=back_markup(),
     )
 
 
@@ -412,25 +448,19 @@ async def keys_callback(
     query = update.callback_query
     await query.answer()
 
-    user = query.from_user
-
     keys = database.get_user_keys(
-        user.id
+        query.from_user.id
     )
 
     if not keys:
         await query.edit_message_text(
-            f"🔐 {APP_NAME}\n\n"
-            "You don't have any API keys.",
-            reply_markup=InlineKeyboardMarkup([
-                back_button()
-            ]),
+            "🔐 You don't have any API keys.",
+            reply_markup=back_markup(),
         )
         return
 
     lines = [
-        f"🔐 {APP_NAME}",
-        "YOUR API KEYS",
+        "🔐 YOUR API KEYS",
         "",
     ]
 
@@ -440,29 +470,22 @@ async def keys_callback(
             f"📛 Name: {key['key_name']}",
             f"📦 Plan: {key['plan'].upper()}",
             f"📌 Status: {key['status']}",
-            "",
-            f"Daily: "
+            f"📊 Today: "
             f"{key['today_requests']}/"
             f"{key['daily_limit']}",
-            f"Total: "
+            f"📈 Total: "
             f"{key['total_requests']}/"
             f"{key['total_limit'] or '∞'}",
-            f"Rate/min: "
+            f"⏱ Rate/min: "
             f"{key['rate_limit'] or '∞'}",
-            f"Start: "
-            f"{key['start_at'] or 'Now'}",
-            f"Expiry: "
+            f"⌛ Expiry: "
             f"{key['expires_at'] or 'Never'}",
-            f"Last used: "
-            f"{key['last_used_at'] or 'Never'}",
             "",
         ])
 
     await query.edit_message_text(
         "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup([
-            back_button()
-        ]),
+        reply_markup=back_markup(),
     )
 
 
@@ -473,25 +496,19 @@ async def usage_callback(
     query = update.callback_query
     await query.answer()
 
-    user = query.from_user
-
     keys = database.get_user_keys(
-        user.id
+        query.from_user.id
     )
 
     if not keys:
         await query.edit_message_text(
-            f"📊 {APP_NAME}\n\n"
-            "No API usage found.",
-            reply_markup=InlineKeyboardMarkup([
-                back_button()
-            ]),
+            "📊 No API usage found.",
+            reply_markup=back_markup(),
         )
         return
 
     lines = [
-        f"📊 {APP_NAME}",
-        "MY USAGE",
+        "📊 MY API USAGE",
         "",
     ]
 
@@ -502,37 +519,33 @@ async def usage_callback(
             - key["today_requests"],
         )
 
-        if key["total_limit"] is None:
-            total_remaining = "∞"
-        else:
-            total_remaining = max(
+        total_remaining = (
+            "∞"
+            if key["total_limit"] is None
+            else max(
                 0,
                 key["total_limit"]
                 - key["total_requests"],
             )
+        )
 
         lines.extend([
             f"🔑 {key['key_name']}",
             f"Today: "
             f"{key['today_requests']}/"
             f"{key['daily_limit']}",
-            f"Daily Remaining: "
-            f"{daily_remaining}",
+            f"Remaining: {daily_remaining}",
             f"Total: "
             f"{key['total_requests']}/"
             f"{key['total_limit'] or '∞'}",
             f"Total Remaining: "
             f"{total_remaining}",
-            f"Last Used: "
-            f"{key['last_used_at'] or 'Never'}",
             "",
         ])
 
     await query.edit_message_text(
         "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup([
-            back_button()
-        ]),
+        reply_markup=back_markup(),
     )
 
 
@@ -543,34 +556,28 @@ async def howto_callback(
     query = update.callback_query
     await query.answer()
 
-    await query.edit_message_text(
-        f"📖 {APP_NAME}\n"
-        "HOW TO USE API\n\n"
+    api_url = database.get_setting(
+        "api_url"
+    )
 
-        "1️⃣ Copy your API key.\n\n"
+    text = database.get_setting(
+        "howto_text"
+    )
 
-        "2️⃣ Search endpoint:\n"
-        f"GET {API_URL}/api/search\n\n"
-
-        "3️⃣ Parameters:\n"
-        "api_key = YOUR_API_KEY\n"
-        "query = YOUR_SEARCH_VALUE\n"
-        "limit = 20\n\n"
-
+    text += (
+        f"\n\nEndpoint:\n"
+        f"{api_url}/api/search\n\n"
         "Example:\n"
-        f"{API_URL}/api/search?"
+        f"{api_url}/api/search?"
         "api_key=YOUR_KEY&"
         "query=TEST&limit=20\n\n"
+        f"Docs:\n"
+        f"{api_url}/docs"
+    )
 
-        "4️⃣ Response is JSON.\n\n"
-
-        "🔐 Keep your API key private.\n\n"
-
-        f"📚 Docs:\n"
-        f"{API_URL}/docs",
-        reply_markup=InlineKeyboardMarkup([
-            back_button()
-        ]),
+    await query.edit_message_text(
+        text,
+        reply_markup=back_markup(),
     )
 
 
@@ -581,18 +588,36 @@ async def docs_callback(
     query = update.callback_query
     await query.answer()
 
+    api_url = database.get_setting(
+        "api_url"
+    )
+
+    text = database.get_setting(
+        "docs_text"
+    )
+
+    text += (
+        f"\n\n{api_url}/docs"
+    )
+
     await query.edit_message_text(
-        f"📚 {APP_NAME}\n\n"
-        f"{API_URL}/docs\n\n"
-        "Endpoints:\n"
-        "GET /\n"
-        "GET /health\n"
-        "GET /api/search\n"
-        "GET /api/status\n"
-        "GET /api/stats",
-        reply_markup=InlineKeyboardMarkup([
-            back_button()
-        ]),
+        text,
+        reply_markup=back_markup(),
+    )
+
+
+async def support_callback(
+    update,
+    context,
+):
+    query = update.callback_query
+    await query.answer()
+
+    await query.edit_message_text(
+        database.get_setting(
+            "support_text"
+        ),
+        reply_markup=back_markup(),
     )
 
 
@@ -607,7 +632,9 @@ async def admin_callback(
     query = update.callback_query
     await query.answer()
 
-    if not is_owner(query.from_user.id):
+    if not is_owner(
+        query.from_user.id
+    ):
         await query.answer(
             "Owner only.",
             show_alert=True,
@@ -616,71 +643,44 @@ async def admin_callback(
 
     data = query.data
 
-    # -----------------------------------------------------
-    # DASHBOARD
-    # -----------------------------------------------------
-
     if data == "admin_dashboard":
+
         stats = database.get_usage_stats()
 
         status = (
-            "🟢 ONLINE"
+            "🟢 ON"
             if stats["global_api_enabled"]
             else "🔴 OFF"
         )
 
-        text = (
-            f"📊 {APP_NAME}\n"
-            "DASHBOARD\n\n"
+        await query.edit_message_text(
+            f"📊 {APP_NAME}\n\n"
             f"API: {status}\n\n"
             f"👥 Users: {stats['users']}\n"
             f"🚫 Blocked: {stats['blocked']}\n"
-            f"🟢 API Enabled: "
-            f"{stats['api_enabled']}\n\n"
             f"🔑 Keys: {stats['keys']}\n"
-            f"🟢 Active: "
-            f"{stats['active_keys']}\n"
-            f"🔒 Revoked: "
-            f"{stats['revoked_keys']}\n"
-            f"⌛ Expired: "
-            f"{stats['expired_keys']}\n\n"
-            f"📈 Requests: "
-            f"{stats['requests']}\n"
-            f"✅ Success: "
-            f"{stats['successful']}\n"
-            f"❌ Failed: "
-            f"{stats['failed']}\n"
-            f"📨 Pending: "
-            f"{stats['pending']}\n"
-            f"📊 Total Usage: "
-            f"{stats['total_usage']}"
-        )
-
-        await query.edit_message_text(
-            text,
+            f"🟢 Active: {stats['active_keys']}\n"
+            f"🔒 Revoked: {stats['revoked_keys']}\n"
+            f"⌛ Expired: {stats['expired_keys']}\n"
+            f"📈 Requests: {stats['requests']}\n"
+            f"✅ Success: {stats['successful']}\n"
+            f"❌ Failed: {stats['failed']}\n"
+            f"📨 Pending: {stats['pending']}\n"
+            f"📊 Total Usage: {stats['total_usage']}",
             reply_markup=admin_menu(),
         )
         return
 
-    # -----------------------------------------------------
-    # PENDING
-    # -----------------------------------------------------
-
     if data == "admin_pending":
-        requests = (
-            database.get_pending_requests()
-        )
+
+        requests = database.get_pending_requests()
 
         if not requests:
-            text = (
-                f"📨 {APP_NAME}\n\n"
-                "No pending requests."
-            )
+            text = "📨 No pending requests."
 
         else:
             lines = [
-                f"📨 {APP_NAME}",
-                "PENDING REQUESTS",
+                "📨 PENDING REQUESTS",
                 "",
             ]
 
@@ -688,11 +688,7 @@ async def admin_callback(
                 lines.extend([
                     f"ID: {req['id']}",
                     f"User: {req['chat_id']}",
-                    f"Username: "
-                    f"@{req.get('username') or 'none'}",
-                    f"Plan: "
-                    f"{req['plan'].upper()}",
-                    f"Status: {req['status']}",
+                    f"Plan: {req['plan'].upper()}",
                     "",
                 ])
 
@@ -704,41 +700,18 @@ async def admin_callback(
         )
         return
 
-    # -----------------------------------------------------
-    # USERS
-    # -----------------------------------------------------
-
     if data == "admin_users":
-        users = database.get_users(
-            50
-        )
+
+        users = database.get_users(50)
 
         lines = [
-            f"👥 {APP_NAME}",
-            "USERS",
+            "👥 USERS",
             "",
         ]
 
-        if not users:
-            lines.append(
-                "No users."
-            )
-
         for user in users:
-            blocked = (
-                "🚫"
-                if user["blocked"]
-                else "🟢"
-            )
-
-            api = (
-                "🟢"
-                if user.get("api_enabled", 1)
-                else "🔴"
-            )
-
             lines.append(
-                f"{blocked} {api} "
+                f"{'🚫' if user['blocked'] else '🟢'} "
                 f"{user['chat_id']} "
                 f"@{user['username'] or 'none'}"
             )
@@ -749,25 +722,14 @@ async def admin_callback(
         )
         return
 
-    # -----------------------------------------------------
-    # KEYS
-    # -----------------------------------------------------
-
     if data == "admin_keys":
-        keys = database.get_all_keys(
-            50
-        )
+
+        keys = database.get_all_keys(50)
 
         lines = [
-            f"🔑 {APP_NAME}",
-            "API KEYS",
+            "🔑 API KEYS",
             "",
         ]
-
-        if not keys:
-            lines.append(
-                "No API keys."
-            )
 
         for key in keys:
             lines.extend([
@@ -776,14 +738,6 @@ async def admin_callback(
                 f"Name: {key['key_name']}",
                 f"Plan: {key['plan'].upper()}",
                 f"Status: {key['status']}",
-                f"Daily: "
-                f"{key['today_requests']}/"
-                f"{key['daily_limit']}",
-                f"Total: "
-                f"{key['total_requests']}/"
-                f"{key['total_limit'] or '∞'}",
-                f"Last: "
-                f"{key['last_used_at'] or 'Never'}",
                 "",
             ])
 
@@ -793,25 +747,14 @@ async def admin_callback(
         )
         return
 
-    # -----------------------------------------------------
-    # USAGE
-    # -----------------------------------------------------
-
     if data == "admin_usage":
-        logs = database.get_recent_logs(
-            30
-        )
+
+        logs = database.get_recent_logs(30)
 
         lines = [
-            f"📈 {APP_NAME}",
-            "RECENT API USAGE",
+            "📈 RECENT API USAGE",
             "",
         ]
-
-        if not logs:
-            lines.append(
-                "No requests."
-            )
 
         for log in logs:
             icon = (
@@ -822,141 +765,108 @@ async def admin_callback(
 
             lines.append(
                 f"{icon} "
-                f"Key:{log['api_key_id']} "
                 f"User:{log['chat_id']} "
-                f"HTTP:{log['status_code']}"
+                f"HTTP:{log['status_code']} "
+                f"Query:{log['query'][:30]}"
             )
 
         await query.edit_message_text(
-            "\n".join(lines),
+            "\n".join(lines) or "No requests.",
             reply_markup=admin_menu(),
         )
         return
 
-    # -----------------------------------------------------
-    # BLOCK
-    # -----------------------------------------------------
+    if data == "admin_customize":
 
-    if data == "admin_block":
         await query.edit_message_text(
-            f"🚫 {APP_NAME}\n\n"
-            "Use command:\n\n"
-            "/block USER_ID",
+            "🎨 CUSTOMIZE USER PANEL\n\n"
+            "Commands:\n\n"
+            "/setwelcome TEXT\n"
+            "/setsupport TEXT\n"
+            "/sethowto TEXT\n"
+            "/setdocs TEXT\n"
+            "/setapiurl URL\n\n"
+            "Button names:\n"
+            "/setbutton plans TEXT\n"
+            "/setbutton request TEXT\n"
+            "/setbutton keys TEXT\n"
+            "/setbutton usage TEXT\n"
+            "/setbutton howto TEXT\n"
+            "/setbutton docs TEXT\n"
+            "/setbutton support TEXT\n\n"
+            "Plans:\n"
+            "/setplan basic DAILY DAYS\n"
+            "/setplan pro DAILY DAYS\n"
+            "/setplan custom DAILY DAYS",
             reply_markup=admin_menu(),
         )
         return
 
-    # -----------------------------------------------------
-    # UNBLOCK
-    # -----------------------------------------------------
+    if data == "admin_settings":
 
-    if data == "admin_unblock":
+        files = os.listdir(
+            os.getenv("DATA_DIR", "data")
+        ) if os.path.exists(
+            os.getenv("DATA_DIR", "data")
+        ) else []
+
+        json_count = len([
+            x for x in files
+            if x.lower().endswith(".json")
+        ])
+
         await query.edit_message_text(
-            f"✅ {APP_NAME}\n\n"
-            "Use command:\n\n"
-            "/unblock USER_ID",
+            f"⚙️ API SETTINGS\n\n"
+            f"API: "
+            f"{'🟢 ON' if database.is_global_api_enabled() else '🔴 OFF'}\n"
+            f"JSON datasets: {json_count}\n"
+            f"API URL:\n"
+            f"{database.get_setting('api_url')}",
             reply_markup=admin_menu(),
         )
         return
-
-    # -----------------------------------------------------
-    # API ON
-    # -----------------------------------------------------
 
     if data == "admin_apion":
+
+        database.set_global_api_enabled(True)
+
         await query.edit_message_text(
-            f"🟢 {APP_NAME}\n\n"
-            "Use:\n"
-            "/apion USER_ID\n\n"
-            "Global ON:\n"
-            "/globalon",
+            "🟢 Global API enabled.",
             reply_markup=admin_menu(),
         )
         return
-
-    # -----------------------------------------------------
-    # API OFF
-    # -----------------------------------------------------
 
     if data == "admin_apioff":
+
+        database.set_global_api_enabled(False)
+
         await query.edit_message_text(
-            f"🔴 {APP_NAME}\n\n"
-            "Use:\n"
-            "/apioff USER_ID\n\n"
-            "Global OFF:\n"
-            "/globaloff",
+            "🔴 Global API disabled.",
             reply_markup=admin_menu(),
         )
         return
-
-    # -----------------------------------------------------
-    # REVOKE
-    # -----------------------------------------------------
-
-    if data == "admin_revoke":
-        await query.edit_message_text(
-            f"🔒 {APP_NAME}\n\n"
-            "Use:\n"
-            "/revoke KEY_ID\n\n"
-            "A confirmation will be shown.",
-            reply_markup=admin_menu(),
-        )
-        return
-
-    # -----------------------------------------------------
-    # DELETE
-    # -----------------------------------------------------
-
-    if data == "admin_delete":
-        await query.edit_message_text(
-            f"🗑️ {APP_NAME}\n\n"
-            "Use:\n"
-            "/deleteapi KEY_ID\n\n"
-            "A confirmation will be shown.",
-            reply_markup=admin_menu(),
-        )
-        return
-
-    # -----------------------------------------------------
-    # CREATE
-    # -----------------------------------------------------
-
-    if data == "admin_create":
-        await query.edit_message_text(
-            f"➕ {APP_NAME}\n\n"
-            "Create API key:\n\n"
-            "/createapi USER_ID PLAN\n\n"
-            "Example:\n"
-            "/createapi 123456789 custom\n\n"
-            "Advanced custom:\n"
-            "/createapi2 USER_ID "
-            "NAME DAILY TOTAL DAYS RATE",
-            reply_markup=admin_menu(),
-        )
-        return
-
-    # -----------------------------------------------------
-    # DOCS
-    # -----------------------------------------------------
 
     if data == "admin_docs":
+
+        api_url = database.get_setting(
+            "api_url"
+        )
+
         await query.edit_message_text(
-            f"📖 {APP_NAME}\n\n"
-            f"{API_URL}/docs\n\n"
-            f"{API_URL}/health\n\n"
-            f"{API_URL}/api/stats",
+            f"📖 API DOCS\n\n"
+            f"{api_url}/docs\n\n"
+            f"{api_url}/health\n\n"
+            f"{api_url}/api/stats",
             reply_markup=admin_menu(),
         )
         return
 
-    # -----------------------------------------------------
-    # HOME
-    # -----------------------------------------------------
-
     if data == "home":
+
         await query.edit_message_text(
-            f"🔥 {APP_NAME}\n\n"
-            "Choose an option:",
+            database.get_setting(
+                "welcome_text"
+            ),
             reply_markup=user_menu(),
         )
         return
@@ -976,57 +886,57 @@ async def owner_decision(
     if not is_owner(
         query.from_user.id
     ):
-        await query.answer(
-            "Owner only.",
-            show_alert=True,
-        )
         return
 
     data = query.data
 
+    request_id = int(
+        data.split("_")[-1]
+    )
+
+    request = database.get_access_request(
+        request_id
+    )
+
+    if not request:
+        await query.edit_message_text(
+            "❌ Request not found."
+        )
+        return
+
+    if request["status"] != "pending":
+        await query.edit_message_text(
+            "⚠️ Already processed."
+        )
+        return
+
     if data.startswith("approve_"):
-        request_id = int(
-            data.replace(
-                "approve_",
-                "",
-            )
-        )
-
-        request = (
-            database.get_access_request(
-                request_id
-            )
-        )
-
-        if not request:
-            await query.edit_message_text(
-                "❌ Request not found."
-            )
-            return
-
-        if request["status"] != "pending":
-            await query.edit_message_text(
-                "⚠️ Already processed."
-            )
-            return
-
-        database.update_access_request(
-            request_id,
-            "approved",
-        )
 
         plan = request["plan"]
 
-        limits = {
-            "basic": 1000,
-            "pro": 10000,
-            "custom": 50000,
-        }
-
-        daily = limits.get(
-            plan,
-            50000,
+        daily = int(
+            database.get_setting(
+                f"{plan}_daily",
+                "50000",
+            )
         )
+
+        days = int(
+            database.get_setting(
+                f"{plan}_days",
+                "30",
+            )
+        )
+
+        expires = None
+
+        if days > 0:
+            expires = (
+                datetime.now(
+                    timezone.utc
+                )
+                + timedelta(days=days)
+            ).isoformat()
 
         raw_key, key_id = (
             database.create_api_key(
@@ -1037,17 +947,14 @@ async def owner_decision(
                 ),
                 daily_limit=daily,
                 total_limit=None,
-                start_at=None,
-                expires_at=(
-                    (
-                        datetime.now(
-                            timezone.utc
-                        )
-                        + timedelta(days=30)
-                    ).isoformat()
-                ),
+                expires_at=expires,
                 rate_limit=None,
             )
+        )
+
+        database.update_access_request(
+            request_id,
+            "approved",
         )
 
         try:
@@ -1060,12 +967,11 @@ async def owner_decision(
                     "API ACCESS APPROVED\n\n"
                     f"Plan: {plan.upper()}\n"
                     f"Key ID: {key_id}\n\n"
-                    "🔑 Your API Key:\n\n"
+                    "🔑 API KEY:\n\n"
                     f"{raw_key}\n\n"
-                    "⚠️ This key is shown only now.\n"
-                    "Keep it private.\n\n"
+                    "⚠️ Save this key now.\n\n"
                     f"📚 Docs:\n"
-                    f"{API_URL}/docs"
+                    f"{database.get_setting('api_url')}/docs"
                 ),
             )
         except Exception as exc:
@@ -1075,31 +981,12 @@ async def owner_decision(
             )
 
         await query.edit_message_text(
-            f"✅ {APP_NAME}\n\n"
-            "Request approved.\n\n"
+            f"✅ Request approved.\n\n"
             f"Request ID: {request_id}\n"
             f"Key ID: {key_id}"
         )
 
-    elif data.startswith("reject_"):
-        request_id = int(
-            data.replace(
-                "reject_",
-                "",
-            )
-        )
-
-        request = (
-            database.get_access_request(
-                request_id
-            )
-        )
-
-        if not request:
-            await query.edit_message_text(
-                "❌ Request not found."
-            )
-            return
+    else:
 
         database.update_access_request(
             request_id,
@@ -1124,20 +1011,234 @@ async def owner_decision(
             )
 
         await query.edit_message_text(
-            f"❌ {APP_NAME}\n\n"
-            "Request rejected.\n\n"
+            f"❌ Request rejected.\n\n"
             f"Request ID: {request_id}"
         )
+
+
+# =========================================================
+# OWNER CUSTOMIZATION COMMANDS
+# =========================================================
+
+async def setwelcome_command(update, context):
+    if not await owner_only(update):
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Usage:\n/setwelcome YOUR TEXT"
+        )
+        return
+
+    database.set_setting(
+        "welcome_text",
+        text,
+    )
+
+    await update.message.reply_text(
+        "✅ Welcome text updated."
+    )
+
+
+async def setsupport_command(update, context):
+    if not await owner_only(update):
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Usage:\n/setsupport YOUR TEXT"
+        )
+        return
+
+    database.set_setting(
+        "support_text",
+        text,
+    )
+
+    await update.message.reply_text(
+        "✅ Support text updated."
+    )
+
+
+async def sethowto_command(update, context):
+    if not await owner_only(update):
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Usage:\n/sethowto YOUR TEXT"
+        )
+        return
+
+    database.set_setting(
+        "howto_text",
+        text,
+    )
+
+    await update.message.reply_text(
+        "✅ How-to text updated."
+    )
+
+
+async def setdocs_command(update, context):
+    if not await owner_only(update):
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Usage:\n/setdocs YOUR TEXT"
+        )
+        return
+
+    database.set_setting(
+        "docs_text",
+        text,
+    )
+
+    await update.message.reply_text(
+        "✅ Documentation text updated."
+    )
+
+
+async def setapiurl_command(update, context):
+    if not await owner_only(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n/setapiurl https://example.com"
+        )
+        return
+
+    url = context.args[0].rstrip("/")
+
+    database.set_setting(
+        "api_url",
+        url,
+    )
+
+    await update.message.reply_text(
+        f"✅ API URL updated:\n{url}"
+    )
+
+
+async def setbutton_command(update, context):
+    if not await owner_only(update):
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/setbutton plans TEXT\n"
+            "/setbutton request TEXT\n"
+            "/setbutton keys TEXT\n"
+            "/setbutton usage TEXT\n"
+            "/setbutton howto TEXT\n"
+            "/setbutton docs TEXT\n"
+            "/setbutton support TEXT"
+        )
+        return
+
+    button = context.args[0].lower()
+
+    allowed = {
+        "plans",
+        "request",
+        "keys",
+        "usage",
+        "howto",
+        "docs",
+        "support",
+    }
+
+    if button not in allowed:
+        await update.message.reply_text(
+            "❌ Invalid button."
+        )
+        return
+
+    text = " ".join(
+        context.args[1:]
+    ).strip()
+
+    database.set_setting(
+        f"button_{button}",
+        text,
+    )
+
+    await update.message.reply_text(
+        "✅ Button name updated."
+    )
+
+
+async def setplan_command(update, context):
+    if not await owner_only(update):
+        return
+
+    if len(context.args) != 3:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/setplan basic DAILY DAYS\n\n"
+            "Example:\n"
+            "/setplan basic 5000 60"
+        )
+        return
+
+    plan = context.args[0].lower()
+
+    if plan not in {
+        "basic",
+        "pro",
+        "custom",
+    }:
+        await update.message.reply_text(
+            "❌ Plan must be basic, pro or custom."
+        )
+        return
+
+    try:
+        daily = int(context.args[1])
+        days = int(context.args[2])
+
+        if daily < 1:
+            raise ValueError
+
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid numbers."
+        )
+        return
+
+    database.set_setting(
+        f"{plan}_daily",
+        str(daily),
+    )
+
+    database.set_setting(
+        f"{plan}_days",
+        str(days),
+    )
+
+    await update.message.reply_text(
+        f"✅ {plan.upper()} updated.\n"
+        f"Daily: {daily}\n"
+        f"Days: {days}"
+    )
 
 
 # =========================================================
 # BLOCK / UNBLOCK
 # =========================================================
 
-async def block_command(
-    update,
-    context,
-):
+async def block_command(update, context):
     if not await owner_only(update):
         return
 
@@ -1147,24 +1248,16 @@ async def block_command(
         )
         return
 
-    user_id = int(
-        context.args[0]
-    )
+    user_id = int(context.args[0])
 
-    database.block_user(
-        user_id
-    )
+    database.block_user(user_id)
 
     await update.message.reply_text(
-        f"🚫 {APP_NAME}\n\n"
-        f"User {user_id} blocked."
+        f"🚫 User {user_id} blocked."
     )
 
 
-async def unblock_command(
-    update,
-    context,
-):
+async def unblock_command(update, context):
     if not await owner_only(update):
         return
 
@@ -1174,28 +1267,20 @@ async def unblock_command(
         )
         return
 
-    user_id = int(
-        context.args[0]
-    )
+    user_id = int(context.args[0])
 
-    database.unblock_user(
-        user_id
-    )
+    database.unblock_user(user_id)
 
     await update.message.reply_text(
-        f"✅ {APP_NAME}\n\n"
-        f"User {user_id} unblocked."
+        f"✅ User {user_id} unblocked."
     )
 
 
 # =========================================================
-# USER API ON/OFF
+# API ON/OFF
 # =========================================================
 
-async def apion_command(
-    update,
-    context,
-):
+async def apion_command(update, context):
     if not await owner_only(update):
         return
 
@@ -1205,24 +1290,16 @@ async def apion_command(
         )
         return
 
-    user_id = int(
-        context.args[0]
-    )
+    user_id = int(context.args[0])
 
-    database.api_on(
-        user_id
-    )
+    database.api_on(user_id)
 
     await update.message.reply_text(
-        f"🟢 {APP_NAME}\n\n"
-        f"API enabled for {user_id}."
+        f"🟢 API enabled for {user_id}."
     )
 
 
-async def apioff_command(
-    update,
-    context,
-):
+async def apioff_command(update, context):
     if not await owner_only(update):
         return
 
@@ -1232,78 +1309,53 @@ async def apioff_command(
         )
         return
 
-    user_id = int(
-        context.args[0]
-    )
+    user_id = int(context.args[0])
 
-    database.api_off(
-        user_id
-    )
+    database.api_off(user_id)
 
     await update.message.reply_text(
-        f"🔴 {APP_NAME}\n\n"
-        f"API disabled for {user_id}."
+        f"🔴 API disabled for {user_id}."
     )
 
 
 # =========================================================
-# GLOBAL ON/OFF
+# GLOBAL
 # =========================================================
 
-async def globalon_command(
-    update,
-    context,
-):
+async def globalon_command(update, context):
     if not await owner_only(update):
         return
 
-    database.set_global_api_enabled(
-        True
-    )
+    database.set_global_api_enabled(True)
 
     await update.message.reply_text(
-        f"🟢 {APP_NAME}\n\n"
-        "Global API is ON."
+        "🟢 Global API ON."
     )
 
 
-async def globaloff_command(
-    update,
-    context,
-):
+async def globaloff_command(update, context):
     if not await owner_only(update):
         return
 
-    database.set_global_api_enabled(
-        False
-    )
+    database.set_global_api_enabled(False)
 
     await update.message.reply_text(
-        f"🔴 {APP_NAME}\n\n"
-        "Global API is OFF.\n"
-        "Maintenance mode enabled."
+        "🔴 Global API OFF."
     )
 
 
 # =========================================================
-# CREATE SIMPLE KEY
+# CREATE API KEY
 # =========================================================
 
-async def createapi_command(
-    update,
-    context,
-):
+async def createapi_command(update, context):
     if not await owner_only(update):
         return
 
     if len(context.args) < 2:
         await update.message.reply_text(
             "Usage:\n"
-            "/createapi USER_ID PLAN\n\n"
-            "Plans:\n"
-            "basic\n"
-            "pro\n"
-            "custom"
+            "/createapi USER_ID PLAN"
         )
         return
 
@@ -1313,153 +1365,56 @@ async def createapi_command(
 
     plan = context.args[1].lower()
 
-    limits = {
-        "basic": 1000,
-        "pro": 10000,
-        "custom": 50000,
-    }
-
-    daily = limits.get(
-        plan,
-        50000,
-    )
-
-    expires = (
-        datetime.now(timezone.utc)
-        + timedelta(days=30)
-    ).isoformat()
-
-    raw_key, key_id = (
-        database.create_api_key(
-            user_id,
-            plan=plan,
-            key_name=(
-                f"{plan.upper()} API"
-            ),
-            daily_limit=daily,
-            expires_at=expires,
+    daily = int(
+        database.get_setting(
+            f"{plan}_daily",
+            "50000",
         )
     )
 
-    await update.message.reply_text(
-        f"🔑 {APP_NAME}\n\n"
-        "API KEY CREATED\n\n"
-        f"User: {user_id}\n"
-        f"Key ID: {key_id}\n"
-        f"Plan: {plan.upper()}\n"
-        f"Daily: {daily}\n"
-        "Expiry: 30 days\n\n"
-        "🔐 RAW KEY:\n\n"
-        f"{raw_key}\n\n"
-        "⚠️ Save it now."
+    days = int(
+        database.get_setting(
+            f"{plan}_days",
+            "30",
+        )
     )
 
+    expires = None
 
-# =========================================================
-# CREATE CUSTOM KEY
-# =========================================================
-
-async def createapi2_command(
-    update,
-    context,
-):
-    if not await owner_only(update):
-        return
-
-    if len(context.args) < 6:
-        await update.message.reply_text(
-            "Usage:\n\n"
-            "/createapi2 "
-            "USER_ID NAME DAILY TOTAL DAYS RATE\n\n"
-            "Example:\n"
-            "/createapi2 "
-            "123456789 TEST 500 10000 30 10\n\n"
-            "TOTAL = 0 means unlimited\n"
-            "DAYS = 0 means no expiry\n"
-            "RATE = 0 means unlimited"
-        )
-        return
-
-    try:
-        user_id = int(
-            context.args[0]
-        )
-
-        name = context.args[1]
-
-        daily = int(
-            context.args[2]
-        )
-
-        total = int(
-            context.args[3]
-        )
-
-        days = int(
-            context.args[4]
-        )
-
-        rate = int(
-            context.args[5]
-        )
-
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Invalid values."
-        )
-        return
-
-    if total <= 0:
-        total = None
-
-    if rate <= 0:
-        rate = None
-
-    if days <= 0:
-        expires = None
-    else:
+    if days > 0:
         expires = (
-            datetime.now(timezone.utc)
+            datetime.now(
+                timezone.utc
+            )
             + timedelta(days=days)
         ).isoformat()
 
     raw_key, key_id = (
         database.create_api_key(
             user_id,
-            plan="custom",
-            key_name=name,
+            plan=plan,
+            key_name=f"{plan.upper()} API",
             daily_limit=daily,
-            total_limit=total,
             expires_at=expires,
-            rate_limit=rate,
         )
     )
 
     await update.message.reply_text(
-        f"🔑 {APP_NAME}\n\n"
-        "CUSTOM API KEY CREATED\n\n"
+        f"🔑 API KEY CREATED\n\n"
         f"User: {user_id}\n"
         f"Key ID: {key_id}\n"
-        f"Name: {name}\n"
+        f"Plan: {plan.upper()}\n"
         f"Daily: {daily}\n"
-        f"Total: {total or '∞'}\n"
-        f"Rate/min: {rate or '∞'}\n"
-        f"Expiry: "
-        f"{expires or 'Never'}\n\n"
-        "🔐 RAW KEY:\n\n"
-        f"{raw_key}\n\n"
-        "⚠️ Save this key now."
+        f"Days: {days}\n\n"
+        f"🔐 KEY:\n{raw_key}"
     )
 
 
 # =========================================================
-# REVOKE
+# REVOKE / DELETE
 # =========================================================
 
-async def revoke_command(
-    update,
-    context,
-):
+async def revoke_command(update, context):
     if not await owner_only(update):
         return
 
@@ -1469,57 +1424,19 @@ async def revoke_command(
         )
         return
 
-    key_id = int(
-        context.args[0]
-    )
+    key_id = int(context.args[0])
 
-    key = database.get_key_by_id(
-        key_id
-    )
-
-    if not key:
+    if database.revoke_key(key_id):
         await update.message.reply_text(
-            "❌ Key not found."
+            "🔒 API key revoked."
         )
-        return
-
-    keyboard = [[
-        InlineKeyboardButton(
-            "🔒 YES, REVOKE",
-            callback_data=(
-                f"confirm_revoke_{key_id}"
-            ),
-        ),
-        InlineKeyboardButton(
-            "❌ CANCEL",
-            callback_data=(
-                "cancel_action"
-            ),
-        ),
-    ]]
-
-    await update.message.reply_text(
-        f"⚠️ {APP_NAME}\n\n"
-        "REVOKE API KEY\n\n"
-        f"Key ID: {key_id}\n"
-        f"User: {key['chat_id']}\n"
-        f"Name: {key['key_name']}\n"
-        f"Plan: {key['plan'].upper()}\n\n"
-        "Are you sure?",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
-    )
+    else:
+        await update.message.reply_text(
+            "❌ Key not found/already revoked."
+        )
 
 
-# =========================================================
-# DELETE
-# =========================================================
-
-async def deleteapi_command(
-    update,
-    context,
-):
+async def deleteapi_command(update, context):
     if not await owner_only(update):
         return
 
@@ -1529,140 +1446,23 @@ async def deleteapi_command(
         )
         return
 
-    key_id = int(
-        context.args[0]
-    )
+    key_id = int(context.args[0])
 
-    key = database.get_key_by_id(
-        key_id
-    )
-
-    if not key:
+    if database.delete_key(key_id):
+        await update.message.reply_text(
+            "🗑️ API key deleted."
+        )
+    else:
         await update.message.reply_text(
             "❌ Key not found."
         )
-        return
-
-    keyboard = [[
-        InlineKeyboardButton(
-            "🗑️ YES, DELETE",
-            callback_data=(
-                f"confirm_delete_{key_id}"
-            ),
-        ),
-        InlineKeyboardButton(
-            "❌ CANCEL",
-            callback_data=(
-                "cancel_action"
-            ),
-        ),
-    ]]
-
-    await update.message.reply_text(
-        f"⚠️ {APP_NAME}\n\n"
-        "DELETE API KEY\n\n"
-        f"Key ID: {key_id}\n"
-        f"User: {key['chat_id']}\n"
-        f"Name: {key['key_name']}\n"
-        f"Plan: {key['plan'].upper()}\n\n"
-        "⚠️ This permanently deletes "
-        "the key record and its logs.\n\n"
-        "Are you sure?",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
-    )
 
 
 # =========================================================
-# CONFIRM ACTIONS
+# STATS
 # =========================================================
 
-async def action_callback(
-    update,
-    context,
-):
-    query = update.callback_query
-    await query.answer()
-
-    if not is_owner(
-        query.from_user.id
-    ):
-        await query.answer(
-            "Owner only.",
-            show_alert=True,
-        )
-        return
-
-    data = query.data
-
-    if data.startswith(
-        "confirm_revoke_"
-    ):
-        key_id = int(
-            data.replace(
-                "confirm_revoke_",
-                "",
-            )
-        )
-
-        success = database.revoke_key(
-            key_id
-        )
-
-        await query.edit_message_text(
-            (
-                f"🔒 {APP_NAME}\n\n"
-                "API key revoked."
-                if success
-                else
-                f"❌ {APP_NAME}\n\n"
-                "Key not found or already revoked."
-            )
-        )
-        return
-
-    if data.startswith(
-        "confirm_delete_"
-    ):
-        key_id = int(
-            data.replace(
-                "confirm_delete_",
-                "",
-            )
-        )
-
-        success = database.delete_key(
-            key_id
-        )
-
-        await query.edit_message_text(
-            (
-                f"🗑️ {APP_NAME}\n\n"
-                "API key permanently deleted."
-                if success
-                else
-                f"❌ {APP_NAME}\n\n"
-                "Key not found."
-            )
-        )
-        return
-
-    if data == "cancel_action":
-        await query.edit_message_text(
-            f"❌ {APP_NAME}\n\n"
-            "Action cancelled."
-        )
-
-
-# =========================================================
-# /STATS
-# =========================================================
-
-async def stats_command(
-    update,
-    context,
-):
+async def stats_command(update, context):
     if not await owner_only(update):
         return
 
@@ -1683,54 +1483,12 @@ async def stats_command(
 
 
 # =========================================================
-# /PENDING
-# =========================================================
-
-async def pending_command(
-    update,
-    context,
-):
-    if not await owner_only(update):
-        return
-
-    requests = (
-        database.get_pending_requests()
-    )
-
-    if not requests:
-        await update.message.reply_text(
-            f"📨 {APP_NAME}\n\n"
-            "No pending requests."
-        )
-        return
-
-    lines = [
-        f"📨 {APP_NAME}",
-        "",
-    ]
-
-    for request in requests:
-        lines.extend([
-            f"ID: {request['id']}",
-            f"User: {request['chat_id']}",
-            f"Plan: {request['plan'].upper()}",
-            f"Status: {request['status']}",
-            "",
-        ])
-
-    await update.message.reply_text(
-        "\n".join(lines)
-    )
-
-
-# =========================================================
 # API SERVER
 # =========================================================
 
 def run_api():
     print(
-        f"{APP_NAME} API starting "
-        f"on port {PORT}"
+        f"{APP_NAME} API starting on port {PORT}"
     )
 
     uvicorn.run(
@@ -1746,6 +1504,7 @@ def run_api():
 # =========================================================
 
 def main():
+
     print("=" * 60)
     print(APP_NAME)
     print("=" * 60)
@@ -1755,12 +1514,6 @@ def main():
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN environment variable is missing."
-        )
-
-    if not OWNER_CHAT_ID:
-        print(
-            "WARNING: OWNER_CHAT_ID "
-            "is not configured."
         )
 
     api_thread = threading.Thread(
@@ -1777,105 +1530,40 @@ def main():
     )
 
     # Commands
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start_command,
-        )
-    )
 
-    application.add_handler(
-        CommandHandler(
-            "admin",
-            admin_command,
-        )
-    )
+    commands = {
+        "start": start_command,
+        "admin": admin_command,
+        "stats": stats_command,
+        "block": block_command,
+        "unblock": unblock_command,
+        "apion": apion_command,
+        "apioff": apioff_command,
+        "globalon": globalon_command,
+        "globaloff": globaloff_command,
+        "createapi": createapi_command,
+        "revoke": revoke_command,
+        "deleteapi": deleteapi_command,
 
-    application.add_handler(
-        CommandHandler(
-            "stats",
-            stats_command,
-        )
-    )
+        "setwelcome": setwelcome_command,
+        "setsupport": setsupport_command,
+        "sethowto": sethowto_command,
+        "setdocs": setdocs_command,
+        "setapiurl": setapiurl_command,
+        "setbutton": setbutton_command,
+        "setplan": setplan_command,
+    }
 
-    application.add_handler(
-        CommandHandler(
-            "pending",
-            pending_command,
+    for name, handler in commands.items():
+        application.add_handler(
+            CommandHandler(
+                name,
+                handler,
+            )
         )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "block",
-            block_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "unblock",
-            unblock_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "apion",
-            apion_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "apioff",
-            apioff_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "globalon",
-            globalon_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "globaloff",
-            globaloff_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "createapi",
-            createapi_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "createapi2",
-            createapi2_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "revoke",
-            revoke_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "deleteapi",
-            deleteapi_command,
-        )
-    )
 
     # User callbacks
+
     application.add_handler(
         CallbackQueryHandler(
             plans_callback,
@@ -1893,10 +1581,7 @@ def main():
     application.add_handler(
         CallbackQueryHandler(
             submit_request_callback,
-            pattern=(
-                "^request_"
-                "(basic|pro|custom)$"
-            ),
+            pattern="^request_(basic|pro|custom)$",
         )
     )
 
@@ -1928,41 +1613,28 @@ def main():
         )
     )
 
-    # Admin
     application.add_handler(
         CallbackQueryHandler(
-            admin_callback,
-            pattern="^admin_",
+            support_callback,
+            pattern="^support$",
         )
     )
 
-    # Approve / reject
+    # Admin
+
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_callback,
+            pattern="^(admin_|home$)",
+        )
+    )
+
+    # Approve/reject
+
     application.add_handler(
         CallbackQueryHandler(
             owner_decision,
-            pattern=(
-                "^(approve|reject)_\\d+$"
-            ),
-        )
-    )
-
-    # Confirm revoke/delete
-    application.add_handler(
-        CallbackQueryHandler(
-            action_callback,
-            pattern=(
-                "^(confirm_revoke|"
-                "confirm_delete)_\\d+$|"
-                "^cancel_action$"
-            ),
-        )
-    )
-
-    # Home
-    application.add_handler(
-        CallbackQueryHandler(
-            admin_callback,
-            pattern="^home$",
+            pattern="^(approve|reject)_\\d+$",
         )
     )
 
