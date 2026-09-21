@@ -24,6 +24,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 WEB_SECRET = os.getenv("WEB_SECRET", "").strip()
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "10000"))
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 
 if not WEB_SECRET:
     # Safe for local development; production should always set WEB_SECRET.
@@ -337,6 +338,213 @@ def stats():
     conn.commit(); conn.close()
     data["global_api_enabled"] = setting("global_api_enabled", "1") == "1"
     return data
+
+
+
+# ----------------------- Local Data Search --------------------
+
+def load_json_records():
+    """Load authorized JSON records from DATA_DIR/*.json.
+
+    Supported formats:
+      1) [ {"id": "...", "mobile": "...", ...}, ... ]
+      2) {"data": [ ... ]}
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    records = []
+    for file_path in sorted(DATA_DIR.glob("*.json")):
+        try:
+            with file_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, list):
+                source = payload
+            elif isinstance(payload, dict):
+                source = payload.get("data", [])
+            else:
+                source = []
+            if isinstance(source, list):
+                for item in source:
+                    if isinstance(item, dict):
+                        row = dict(item)
+                        row["_dataset"] = file_path.name
+                        records.append(row)
+        except Exception as exc:
+            app.logger.warning("JSON LOAD ERROR %s: %s", file_path, exc)
+    return records
+
+
+def searchable_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def search_local_data(query, limit=20):
+    q = str(query or "").strip().casefold()
+    if not q:
+        return []
+    limit = max(1, min(int(limit or 20), 100))
+    results = []
+    for row in load_json_records():
+        if any(q in searchable_text(value).casefold() for value in row.values()):
+            # Hide the internal dataset marker from the browser result.
+            result = {k: v for k, v in row.items() if k != "_dataset"}
+            results.append(result)
+            if len(results) >= limit:
+                break
+    return results
+
+
+def get_active_web_key(chat_id):
+    conn = db()
+    refresh_key_statuses(conn)
+    row = conn.execute(
+        "SELECT * FROM api_keys WHERE chat_id=? AND status='active' "
+        "ORDER BY id DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return row
+
+
+def consume_web_search(chat_id):
+    """Consume one request from the user's active website API key.
+    This mirrors the website-side limits without depending on the FastAPI process.
+    """
+    if setting("global_api_enabled", "1") != "1":
+        return False, "api_access_disabled", None
+
+    conn = db()
+    refresh_key_statuses(conn)
+    user = conn.execute(
+        "SELECT * FROM users WHERE chat_id=?", (chat_id,)
+    ).fetchone()
+    key = conn.execute(
+        "SELECT * FROM api_keys WHERE chat_id=? AND status='active' "
+        "ORDER BY id DESC LIMIT 1", (chat_id,)
+    ).fetchone()
+
+    if not user:
+        conn.close()
+        return False, "user_not_found", None
+    if user["blocked"]:
+        conn.close()
+        return False, "user_blocked", None
+    if not user["api_enabled"]:
+        conn.close()
+        return False, "api_access_disabled", None
+    if not key:
+        conn.close()
+        return False, "no_active_key", None
+
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    today_requests = key["today_requests"]
+    if key["last_request_date"] != today:
+        today_requests = 0
+
+    if key["daily_limit"] is not None and today_requests >= key["daily_limit"]:
+        conn.close()
+        return False, "daily_limit", key
+    if key["total_limit"] is not None and key["total_requests"] >= key["total_limit"]:
+        conn.close()
+        return False, "total_limit", key
+
+    new_today = today_requests + 1
+    new_total = key["total_requests"] + 1
+    conn.execute(
+        """UPDATE api_keys
+           SET today_requests=?, total_requests=?, last_request_date=?, last_used_at=?
+           WHERE id=?""",
+        (new_today, new_total, today, now.isoformat(), key["id"]),
+    )
+    conn.commit()
+    updated = conn.execute("SELECT * FROM api_keys WHERE id=?", (key["id"],)).fetchone()
+    conn.close()
+    return True, "ok", updated
+
+
+@app.route("/search", methods=["GET", "POST"])
+@login_required
+def search_page(user):
+    query = request.values.get("query", "").strip()
+    limit = request.values.get("limit", "20").strip() or "20"
+    try:
+        limit = max(1, min(int(limit), 100))
+    except ValueError:
+        limit = 20
+
+    results = []
+    error = ""
+    searched = False
+    chat_id = ensure_chat_user(user["id"])
+
+    if query:
+        searched = True
+        allowed, reason, _key = consume_web_search(chat_id)
+        if not allowed:
+            messages = {
+                "api_access_disabled": "API access is currently disabled.",
+                "user_blocked": "Your account is blocked.",
+                "no_active_key": "You need an active API key before searching.",
+                "daily_limit": "Your daily search limit has been reached.",
+                "total_limit": "Your total search limit has been reached.",
+                "user_not_found": "User account was not found.",
+            }
+            error = messages.get(reason, "Search is not available right now.")
+        else:
+            results = search_local_data(query, limit)
+            audit("website_search", query, user["id"])
+
+    return render_template(
+        "search.html",
+        user=user,
+        query=query,
+        limit=limit,
+        results=results,
+        error=error,
+        searched=searched,
+        data_dir=str(DATA_DIR),
+        json_file_count=len(list(DATA_DIR.glob("*.json"))) if DATA_DIR.exists() else 0,
+    )
+
+
+@app.route("/api/site/search")
+@login_required
+def site_search_api(user):
+    query = request.args.get("query", "").strip()
+    if not query:
+        return jsonify({"success": False, "error": "query_required"}), 400
+
+    try:
+        limit = max(1, min(int(request.args.get("limit", "20")), 100))
+    except ValueError:
+        limit = 20
+
+    chat_id = ensure_chat_user(user["id"])
+    allowed, reason, key = consume_web_search(chat_id)
+    if not allowed:
+        return jsonify({"success": False, "error": reason}), 403
+
+    results = search_local_data(query, limit)
+    return jsonify({
+        "success": True,
+        "query": query,
+        "count": len(results),
+        "results": results,
+        "usage": {
+            "today": key["today_requests"],
+            "daily_limit": key["daily_limit"],
+            "total": key["total_requests"],
+            "total_limit": key["total_limit"],
+        },
+    })
 
 
 # -------------------------- Public ---------------------------
