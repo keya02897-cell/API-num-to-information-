@@ -1,503 +1,297 @@
-from flask import Flask, render_template, request, jsonify
-from pathlib import Path
+import os
 import json
 import re
-import traceback
-import threading
+from pathlib import Path
+from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
+
+# ============================================================
+# KRUTIK CYBER EXPERT API
+# Server-side JSON search website
+# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
-MAX_NUMBERS = 100
-MAX_RESULTS = 500
+MAX_NUMBERS_PER_REQUEST = 100
 
-# Mobile -> records
-NUMBER_INDEX = {}
-
-# Prevent multiple workers from building index simultaneously
-INDEX_LOCK = threading.Lock()
-
-INDEX_READY = False
-
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
 
 def normalize_number(value):
-    return re.sub(r"\D", "", str(value or ""))
-
-
-def build_index():
     """
-    Load all JSON files once and create:
+    Keep only digits.
+    Example:
+        '+91 93777-11765' -> '919377711765'
+        '9377711765'      -> '9377711765'
+    """
+    if value is None:
+        return ""
 
-        mobile_number -> matching records
+    return re.sub(r"\D", "", str(value))
 
-    JSON files remain server-side.
+
+def extract_numbers(value):
+    """
+    Accept:
+      9377711765
+      9377711765,9812345674
+      9377711765
+      9812345674
+      9377711765 9812345674
+      9377711765;9812345674
+    """
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[\s,;]+", str(value or ""))
+
+    numbers = []
+
+    for item in raw_items:
+        number = normalize_number(item)
+
+        if number and number not in numbers:
+            numbers.append(number)
+
+    return numbers
+
+
+def load_json_file(file_path):
+    """
+    Supports the user's exact format:
+
+    [
+        {
+            "id": "...",
+            "mobile": "...",
+            "name": "...",
+            "pincode": "...",
+            "city": "...",
+            "address": "..."
+        }
+    ]
+
+    Also supports:
+
+    {
+        "data": [
+            {...}
+        ]
+    }
     """
 
-    global NUMBER_INDEX
-    global INDEX_READY
+    with file_path.open("r", encoding="utf-8-sig") as f:
+        content = json.load(f)
 
-    with INDEX_LOCK:
+    if isinstance(content, list):
+        records = content
 
-        if INDEX_READY:
-            return
+    elif isinstance(content, dict):
+        records = content.get("data", [])
 
-        print("=" * 50)
-        print("KRUTIK CYBER EXPERT API")
-        print("Building data index...")
-        print("DATA DIR:", DATA_DIR)
-        print("=" * 50)
+    else:
+        return []
 
-        temp_index = {}
+    if not isinstance(records, list):
+        return []
 
-        if not DATA_DIR.exists():
+    return [
+        record
+        for record in records
+        if isinstance(record, dict)
+    ]
 
-            DATA_DIR.mkdir(
-                parents=True,
-                exist_ok=True
-            )
 
-            print("Data directory created.")
+# ------------------------------------------------------------
+# Search JSON files
+# ------------------------------------------------------------
 
-            NUMBER_INDEX = {}
-            INDEX_READY = True
+def search_json_files(numbers):
+    """
+    Searches all JSON files inside /data.
 
-            return
+    IMPORTANT:
+    Data never goes directly to browser.
+    Only matching records are returned.
+    """
 
-
-        json_files = sorted(
-            DATA_DIR.glob("*.json")
-        )
-
-        print(
-            "JSON files found:",
-            len(json_files)
-        )
-
-
-        total_records = 0
-        successful_files = 0
-
-
-        for file_path in json_files:
-
-            try:
-
-                print(
-                    "[LOADING]",
-                    file_path.name
-                )
-
-                with file_path.open(
-                    "r",
-                    encoding="utf-8"
-                ) as file:
-
-                    data = json.load(file)
-
-
-                if isinstance(data, list):
-
-                    records = data
-
-                elif isinstance(data, dict):
-
-                    records = data.get(
-                        "data",
-                        []
-                    )
-
-                else:
-
-                    print(
-                        "[SKIP]",
-                        file_path.name,
-                        "- invalid format"
-                    )
-
-                    continue
-
-
-                if not isinstance(
-                    records,
-                    list
-                ):
-
-                    print(
-                        "[SKIP]",
-                        file_path.name,
-                        "- data is not list"
-                    )
-
-                    continue
-
-
-                file_count = 0
-
-
-                for record in records:
-
-                    if not isinstance(
-                        record,
-                        dict
-                    ):
-
-                        continue
-
-
-                    mobile = normalize_number(
-                        record.get(
-                            "mobile",
-                            ""
-                        )
-                    )
-
-
-                    if not mobile:
-                        continue
-
-
-                    if mobile not in temp_index:
-
-                        temp_index[mobile] = []
-
-
-                    temp_index[
-                        mobile
-                    ].append(record)
-
-
-                    file_count += 1
-                    total_records += 1
-
-
-                successful_files += 1
-
-
-                print(
-                    "[LOADED]",
-                    file_path.name,
-                    "->",
-                    file_count,
-                    "records"
-                )
-
-
-            except json.JSONDecodeError as error:
-
-                print(
-                    "[JSON ERROR]",
-                    file_path.name
-                )
-
-                print(error)
-
-
-            except MemoryError:
-
-                print(
-                    "[MEMORY ERROR]",
-                    file_path.name
-                )
-
-                raise
-
-
-            except Exception as error:
-
-                print(
-                    "[FILE ERROR]",
-                    file_path.name,
-                    error
-                )
-
-
-        NUMBER_INDEX = temp_index
-        INDEX_READY = True
-
-
-        print("=" * 50)
-
-        print(
-            "INDEX READY"
-        )
-
-        print(
-            "Files:",
-            successful_files
-        )
-
-        print(
-            "Records:",
-            total_records
-        )
-
-        print(
-            "Unique numbers:",
-            len(NUMBER_INDEX)
-        )
-
-        print("=" * 50)
-
-
-def search_numbers(numbers):
-
-    if not INDEX_READY:
-
-        build_index()
-
+    wanted = set(numbers)
 
     results = []
+    searched_files = 0
+    loaded_records = 0
+    errors = []
 
+    if not DATA_DIR.exists():
+        return {
+            "results": [],
+            "searched_files": 0,
+            "loaded_records": 0,
+            "errors": ["data directory not found"]
+        }
 
-    for number in numbers:
+    json_files = sorted(DATA_DIR.glob("*.json"))
 
-        normalized = normalize_number(
-            number
-        )
+    for file_path in json_files:
+        searched_files += 1
 
+        try:
+            records = load_json_file(file_path)
+            loaded_records += len(records)
 
-        matches = NUMBER_INDEX.get(
-            normalized,
-            []
-        )
+            for record in records:
+                mobile = normalize_number(record.get("mobile", ""))
 
+                if mobile in wanted:
+                    result = dict(record)
 
-        for record in matches:
+                    # Do not expose internal filename/path.
+                    results.append(result)
 
-            # Make a copy so original
-            # server-side data is untouched.
-            safe_record = dict(record)
-
-            results.append(
-                safe_record
+        except Exception as exc:
+            errors.append(
+                f"{file_path.name}: {type(exc).__name__}: {exc}"
             )
 
+    return {
+        "results": results,
+        "searched_files": searched_files,
+        "loaded_records": loaded_records,
+        "errors": errors
+    }
 
-            if len(results) >= MAX_RESULTS:
 
-                return results
+# ------------------------------------------------------------
+# Routes
+# ------------------------------------------------------------
 
-
-    return results
-
-
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-
-    return render_template(
-        "index.html"
-    )
+    return render_template("index.html")
 
 
 @app.route("/health", methods=["GET"])
 def health():
+    """
+    Health check.
 
-    try:
+    Does NOT expose data.
+    """
 
-        json_files = (
-            list(DATA_DIR.glob("*.json"))
-            if DATA_DIR.exists()
-            else []
-        )
+    json_files = 0
 
+    if DATA_DIR.exists():
+        json_files = len(list(DATA_DIR.glob("*.json")))
 
-        return jsonify({
-            "ok": True,
-            "status": "online",
-            "json_files": len(json_files),
-            "index_ready": INDEX_READY
-        }), 200
-
-
-    except Exception as error:
-
-        return jsonify({
-            "ok": False,
-            "message": str(error)
-        }), 500
+    return jsonify({
+        "ok": True,
+        "status": "online",
+        "json_files": json_files
+    })
 
 
 @app.route("/search", methods=["POST"])
 def search():
+    """
+    POST /search
+
+    JSON:
+    {
+        "numbers": "9377711765,9812345674"
+    }
+
+    or:
+
+    {
+        "numbers": [
+            "9377711765",
+            "9812345674"
+        ]
+    }
+    """
 
     try:
+        data = request.get_json(silent=True)
 
-        # Make sure index is ready.
-        if not INDEX_READY:
-
-            build_index()
-
-
-        payload = request.get_json(
-            silent=True
-        )
-
-
-        if not isinstance(
-            payload,
-            dict
-        ):
-
+        if not isinstance(data, dict):
             return jsonify({
                 "ok": False,
-                "message": "Invalid JSON request."
+                "error": "Invalid JSON request"
             }), 400
 
+        numbers = extract_numbers(data.get("numbers"))
 
-        raw_numbers = str(
-            payload.get(
-                "numbers",
-                ""
-            )
-        ).strip()
-
-
-        if not raw_numbers:
-
+        if not numbers:
             return jsonify({
                 "ok": False,
-                "message": "Please enter number."
+                "error": "Please enter at least one valid number"
             }), 400
 
-
-        parts = re.split(
-            r"[\s,;]+",
-            raw_numbers
-        )
-
-
-        parts = [
-            item.strip()
-            for item in parts
-            if item.strip()
-        ]
-
-
-        if len(parts) > MAX_NUMBERS:
-
+        if len(numbers) > MAX_NUMBERS_PER_REQUEST:
             return jsonify({
                 "ok": False,
-                "message": (
-                    f"Maximum {MAX_NUMBERS} "
-                    "numbers allowed."
-                )
+                "error": f"Maximum {MAX_NUMBERS_PER_REQUEST} numbers allowed per request"
             }), 400
 
-
-        valid_numbers = []
-
-
-        for number in parts:
-
-            normalized = normalize_number(
-                number
-            )
-
-
-            if len(normalized) >= 7:
-
-                valid_numbers.append(
-                    normalized
-                )
-
-
-        if not valid_numbers:
-
-            return jsonify({
-                "ok": False,
-                "message": "No valid numbers."
-            }), 400
-
-
-        results = search_numbers(
-            valid_numbers
-        )
-
+        search_result = search_json_files(numbers)
 
         return jsonify({
             "ok": True,
-            "searched": len(
-                valid_numbers
-            ),
-            "found": len(results),
-            "results": results
-        }), 200
+            "searched": len(numbers),
+            "found": len(search_result["results"]),
+            "results": search_result["results"]
+        })
 
-
-    except MemoryError:
-
-        print(
-            "[MEMORY ERROR] Search"
-        )
+    except Exception as exc:
+        app.logger.exception("SEARCH ERROR")
 
         return jsonify({
             "ok": False,
-            "message": (
-                "Server memory limit reached."
-            )
-        }), 503
-
-
-    except Exception as error:
-
-        print(
-            "[SEARCH ERROR]"
-        )
-
-        traceback.print_exc()
-
-
-        return jsonify({
-            "ok": False,
-            "message": (
-                "Search failed: "
-                + str(error)
-            )
+            "error": "Server search error",
+            "details": str(exc)
         }), 500
 
 
-@app.errorhandler(404)
-def not_found(error):
+# ------------------------------------------------------------
+# Prevent accidental exposure of data directory
+# ------------------------------------------------------------
 
+@app.route("/data")
+@app.route("/data/")
+@app.route("/data/<path:filename>")
+def block_data_access(filename=None):
     return jsonify({
         "ok": False,
-        "message": "Not found."
-    }), 404
+        "error": "Access denied"
+    }), 403
 
 
-@app.errorhandler(405)
-def method_not_allowed(error):
-
-    return jsonify({
-        "ok": False,
-        "message": "Method not allowed."
-    }), 405
-
-
-@app.errorhandler(500)
-def internal_error(error):
-
-    return jsonify({
-        "ok": False,
-        "message": "Internal server error."
-    }), 500
-
+# ------------------------------------------------------------
+# Run locally
+# ------------------------------------------------------------
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
 
-    DATA_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    print("=" * 60)
+    print("KRUTIK CYBER EXPERT API")
+    print("=" * 60)
+    print(f"BASE DIR : {BASE_DIR}")
+    print(f"DATA DIR : {DATA_DIR}")
 
-    print(
-        "Starting local server..."
-    )
+    if DATA_DIR.exists():
+        files = list(DATA_DIR.glob("*.json"))
+        print(f"JSON FILES: {len(files)}")
+    else:
+        print("DATA DIR NOT FOUND")
+
+    print("=" * 60)
 
     app.run(
         host="0.0.0.0",
-        port=5000,
+        port=port,
         debug=False
     )
