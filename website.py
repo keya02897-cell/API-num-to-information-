@@ -2,132 +2,95 @@ from flask import Flask, render_template, request, jsonify
 from pathlib import Path
 import json
 import re
-from functools import lru_cache
+import traceback
 
 app = Flask(__name__)
 
-# IMPORTANT:
-# data/ is server-side only.
-# Do NOT put it inside static/.
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
-MAX_NUMBERS_PER_SEARCH = 100
-MAX_RESULTS = 100
+MAX_NUMBERS = 100
+MAX_RESULTS = 500
 
 
 def normalize_number(value):
-    """
-    Converts:
-        +91 98765 43210
-        9876543210
-        98765-43210
-    into digits only.
-    """
     return re.sub(r"\D", "", str(value or ""))
 
 
-@lru_cache(maxsize=1)
-def load_data():
-    """
-    Loads all JSON datasets from server-side data/ directory.
-
-    Supported formats:
-
-    [
-        {...},
-        {...}
-    ]
-
-    OR
-
-    {
-        "data": [
-            {...},
-            {...}
-        ]
-    }
-    """
-
+def load_all_json_files():
     records = []
+    loaded_files = 0
 
     if not DATA_DIR.exists():
-        print("WARNING: data directory does not exist:", DATA_DIR)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
         return records
 
-    for json_file in sorted(DATA_DIR.glob("*.json")):
+    for file_path in sorted(DATA_DIR.glob("*.json")):
 
         try:
-            with json_file.open("r", encoding="utf-8") as file:
-                content = json.load(file)
+            with file_path.open(
+                "r",
+                encoding="utf-8"
+            ) as f:
+                data = json.load(f)
 
-            if isinstance(content, list):
-                items = content
+            if isinstance(data, list):
+                items = data
 
-            elif isinstance(content, dict):
-                items = content.get("data", [])
+            elif isinstance(data, dict):
+                items = data.get("data", [])
 
             else:
                 print(
-                    f"SKIPPED {json_file.name}: "
-                    "invalid JSON structure"
+                    f"[SKIP] {file_path.name}: "
+                    "JSON must be list or {data: [...]}"
                 )
                 continue
 
             if not isinstance(items, list):
                 print(
-                    f"SKIPPED {json_file.name}: "
-                    "'data' must be a list"
+                    f"[SKIP] {file_path.name}: "
+                    "data is not a list"
                 )
                 continue
 
+            loaded_files += 1
+
             for item in items:
 
-                if not isinstance(item, dict):
-                    continue
-
-                record = dict(item)
-
-                # Internal field.
-                # It is removed before sending response.
-                record["_dataset"] = json_file.name
-
-                records.append(record)
+                if isinstance(item, dict):
+                    records.append(item)
 
             print(
-                f"LOADED {json_file.name}: "
+                f"[LOADED] {file_path.name} -> "
                 f"{len(items)} records"
             )
 
-        except json.JSONDecodeError as exc:
+        except json.JSONDecodeError as e:
 
             print(
-                f"JSON ERROR [{json_file.name}]: {exc}"
+                f"[JSON ERROR] {file_path.name}: {e}"
             )
 
-        except Exception as exc:
+        except Exception as e:
 
             print(
-                f"LOAD ERROR [{json_file.name}]: {exc}"
+                f"[ERROR] {file_path.name}: {e}"
             )
 
     print(
-        f"TOTAL RECORDS LOADED: {len(records)}"
+        f"[TOTAL] Files: {loaded_files} | "
+        f"Records: {len(records)}"
     )
 
     return records
 
 
-def find_records(numbers):
-    """
-    Exact mobile-number matching.
-
-    Only the server reads the dataset.
-    """
+def search_numbers(numbers):
 
     wanted = {
-        normalize_number(number)
-        for number in numbers
+        normalize_number(x)
+        for x in numbers
     }
 
     wanted.discard("")
@@ -135,133 +98,149 @@ def find_records(numbers):
     if not wanted:
         return []
 
-    found = []
+    all_records = load_all_json_files()
 
-    for record in load_data():
+    results = []
+
+    for record in all_records:
 
         mobile = normalize_number(
             record.get("mobile", "")
         )
 
-        if mobile in wanted:
+        if mobile and mobile in wanted:
 
-            # Never expose internal dataset name.
-            safe_record = {
-                key: value
-                for key, value in record.items()
-                if key != "_dataset"
-            }
+            results.append(record)
 
-            found.append(safe_record)
-
-            if len(found) >= MAX_RESULTS:
+            if len(results) >= MAX_RESULTS:
                 break
 
-    return found
+    return results
 
 
-@app.get("/")
-def index():
+@app.route("/", methods=["GET"])
+def home():
     return render_template("index.html")
 
 
-@app.post("/search")
+@app.route("/search", methods=["POST"])
 def search():
 
-    payload = request.get_json(
-        silent=True
-    )
+    try:
 
-    if not isinstance(payload, dict):
-        return jsonify({
-            "ok": False,
-            "message": "Invalid request."
-        }), 400
+        data = request.get_json(
+            silent=True
+        )
 
-    raw_numbers = str(
-        payload.get("numbers", "")
-    ).strip()
+        if not isinstance(data, dict):
 
-    if not raw_numbers:
+            return jsonify({
+                "ok": False,
+                "message": "Invalid JSON request."
+            }), 400
 
-        return jsonify({
-            "ok": False,
-            "message": "Please enter at least one number."
-        }), 400
+        raw_numbers = str(
+            data.get("numbers", "")
+        ).strip()
 
-    # New line / comma / semicolon / whitespace
-    parts = re.split(
-        r"[\s,;]+",
-        raw_numbers
-    )
+        if not raw_numbers:
 
-    parts = [
-        part.strip()
-        for part in parts
-        if part.strip()
-    ]
+            return jsonify({
+                "ok": False,
+                "message": "Please enter number."
+            }), 400
 
-    if len(parts) > MAX_NUMBERS_PER_SEARCH:
+        parts = re.split(
+            r"[\s,;]+",
+            raw_numbers
+        )
 
-        return jsonify({
-            "ok": False,
-            "message": (
-                f"Maximum "
-                f"{MAX_NUMBERS_PER_SEARCH} "
-                "numbers per search."
+        parts = [
+            x.strip()
+            for x in parts
+            if x.strip()
+        ]
+
+        if len(parts) > MAX_NUMBERS:
+
+            return jsonify({
+                "ok": False,
+                "message": (
+                    f"Maximum {MAX_NUMBERS} "
+                    "numbers allowed."
+                )
+            }), 400
+
+        valid_numbers = []
+
+        for number in parts:
+
+            normalized = normalize_number(
+                number
             )
-        }), 400
 
-    valid_numbers = []
-    invalid_numbers = []
+            if len(normalized) >= 7:
+                valid_numbers.append(
+                    normalized
+                )
 
-    for number in parts:
+        if not valid_numbers:
 
-        normalized = normalize_number(number)
+            return jsonify({
+                "ok": False,
+                "message": "No valid numbers."
+            }), 400
 
-        if len(normalized) < 7:
-            invalid_numbers.append(number)
-            continue
+        results = search_numbers(
+            valid_numbers
+        )
 
-        valid_numbers.append(normalized)
+        return jsonify({
+            "ok": True,
+            "searched": len(valid_numbers),
+            "found": len(results),
+            "results": results
+        }), 200
 
-    if not valid_numbers:
+    except Exception as e:
+
+        print(
+            "[SEARCH ERROR]"
+        )
+
+        traceback.print_exc()
 
         return jsonify({
             "ok": False,
-            "message": "No valid numbers found."
-        }), 400
-
-    results = find_records(
-        valid_numbers
-    )
-
-    return jsonify({
-        "ok": True,
-        "searched": len(valid_numbers),
-        "found": len(results),
-        "invalid": invalid_numbers,
-        "results": results
-    })
+            "message": "Internal server error."
+        }), 500
 
 
-@app.get("/health")
+@app.route("/health", methods=["GET"])
 def health():
 
-    return jsonify({
-        "status": "ok",
-        "datasets": (
-            len(
-                list(DATA_DIR.glob("*.json"))
-            )
-            if DATA_DIR.exists()
-            else 0
-        )
-    })
+    try:
+
+        files = list(
+            DATA_DIR.glob("*.json")
+        ) if DATA_DIR.exists() else []
+
+        return jsonify({
+            "ok": True,
+            "status": "online",
+            "json_files": len(files)
+        }), 200
+
+    except Exception as e:
+
+        return jsonify({
+            "ok": False,
+            "message": str(e)
+        }), 500
 
 
 @app.errorhandler(404)
-def not_found(error):
+def handle_404(error):
 
     return jsonify({
         "ok": False,
@@ -270,7 +249,7 @@ def not_found(error):
 
 
 @app.errorhandler(405)
-def method_not_allowed(error):
+def handle_405(error):
 
     return jsonify({
         "ok": False,
@@ -279,7 +258,7 @@ def method_not_allowed(error):
 
 
 @app.errorhandler(500)
-def server_error(error):
+def handle_500(error):
 
     return jsonify({
         "ok": False,
@@ -289,7 +268,23 @@ def server_error(error):
 
 if __name__ == "__main__":
 
-    # Local testing only.
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    print()
+    print("==============================")
+    print("KRUTIK CYBER EXPERT API")
+    print("==============================")
+    print(
+        "DATA DIR:",
+        DATA_DIR
+    )
+    print()
+    print("Server: http://127.0.0.1:5000")
+    print()
+
     app.run(
         host="0.0.0.0",
         port=5000,
