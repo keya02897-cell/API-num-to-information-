@@ -3,34 +3,29 @@
 
 <head>
 
-    <meta charset="UTF-8">
+<meta charset="UTF-8">
 
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
-    <meta
-        name="description"
-        content="KRUTIK CYBER EXPERT API Search"
-    >
+<title>
+KRUTIK CYBER EXPERT API
+</title>
 
-    <title>
-        KRUTIK CYBER EXPERT API
-    </title>
-
-    <link
-        rel="stylesheet"
-        href="{{ url_for('static', filename='style.css') }}"
-    >
+<link
+    rel="stylesheet"
+    href="/static/style.css"
+>
 
 </head>
 
 <body>
 
-<div class="page">
+<div class="container">
 
-    <header class="header">
+    <div class="header">
 
         <div class="brand">
             KRUTIK CYBER EXPERT API
@@ -41,15 +36,15 @@
         </h1>
 
         <p>
-            Search authorized dataset records
+            Search authorized records
         </p>
 
-    </header>
+    </div>
 
 
-    <section class="search-box">
+    <div class="search-box">
 
-        <label for="numbers">
+        <label>
             Enter Number(s)
         </label>
 
@@ -58,17 +53,16 @@
             placeholder="9876543210
 9123456789
 9988776655"
-            autocomplete="off"
         ></textarea>
 
-        <div class="help">
-            Multiple numbers can be entered using
-            new lines, spaces, commas or semicolons.
+        <div class="hint">
+            Multiple numbers:
+            new line, space, comma or semicolon.
         </div>
 
         <button
-            id="searchButton"
-            type="button"
+            id="searchBtn"
+            onclick="searchNumbers()"
         >
             SEARCH
         </button>
@@ -78,49 +72,37 @@
             class="status"
         ></div>
 
-    </section>
+    </div>
 
 
-    <section
+    <div
         id="summary"
-        class="summary hidden"
-    ></section>
+        class="summary"
+    ></div>
 
 
-    <section
+    <div
         id="results"
         class="results"
-    ></section>
+    ></div>
 
 </div>
 
 
 <script>
 
-const numbersInput =
-    document.getElementById("numbers");
+function escapeHTML(value) {
 
-const searchButton =
-    document.getElementById("searchButton");
+    const div =
+        document.createElement("div");
 
-const statusBox =
-    document.getElementById("status");
+    div.textContent =
+        value === null ||
+        value === undefined
+            ? ""
+            : String(value);
 
-const summaryBox =
-    document.getElementById("summary");
-
-const resultsBox =
-    document.getElementById("results");
-
-
-function escapeHtml(value) {
-
-    return String(value ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
+    return div.innerHTML;
 }
 
 
@@ -129,173 +111,106 @@ function setStatus(
     type = ""
 ) {
 
-    statusBox.className =
+    const status =
+        document.getElementById(
+            "status"
+        );
+
+    status.className =
         "status " + type;
 
-    statusBox.textContent =
+    status.textContent =
         message;
 }
 
 
-function showLoading() {
+async function readResponse(response) {
 
-    searchButton.disabled = true;
+    /*
+       FIX:
+       Never blindly call response.json().
+    */
 
-    searchButton.textContent =
+    const text =
+        await response.text();
+
+    if (!text) {
+
+        throw new Error(
+            "Server returned an empty response."
+        );
+    }
+
+    try {
+
+        return JSON.parse(text);
+
+    } catch (error) {
+
+        console.error(
+            "SERVER RESPONSE:",
+            text
+        );
+
+        throw new Error(
+            "Server returned invalid JSON."
+        );
+    }
+}
+
+
+async function searchNumbers() {
+
+    const input =
+        document.getElementById(
+            "numbers"
+        );
+
+    const button =
+        document.getElementById(
+            "searchBtn"
+        );
+
+    const summary =
+        document.getElementById(
+            "summary"
+        );
+
+    const results =
+        document.getElementById(
+            "results"
+        );
+
+    const value =
+        input.value.trim();
+
+
+    if (!value) {
+
+        setStatus(
+            "Please enter number.",
+            "error"
+        );
+
+        input.focus();
+
+        return;
+    }
+
+
+    button.disabled = true;
+
+    button.textContent =
         "SEARCHING...";
+
+    summary.innerHTML = "";
+
+    results.innerHTML = "";
 
     setStatus(
         "Searching...",
         "loading"
     );
-
-    summaryBox.classList.add(
-        "hidden"
-    );
-
-    resultsBox.innerHTML = "";
-}
-
-
-function stopLoading() {
-
-    searchButton.disabled = false;
-
-    searchButton.textContent =
-        "SEARCH";
-}
-
-
-function renderResults(data) {
-
-    resultsBox.innerHTML = "";
-
-    if (!data.results.length) {
-
-        resultsBox.innerHTML = `
-            <div class="empty">
-
-                <div class="empty-icon">
-                    🔎
-                </div>
-
-                <h2>
-                    No Result Found
-                </h2>
-
-                <p>
-                    No matching record was found.
-                </p>
-
-            </div>
-        `;
-
-        return;
-    }
-
-
-    data.results.forEach(
-        (record, index) => {
-
-            const fields =
-                Object.entries(record);
-
-            let html = `
-
-                <article class="result-card">
-
-                    <div class="result-number">
-                        RESULT ${index + 1}
-                    </div>
-
-                    <div class="fields">
-
-            `;
-
-
-            fields.forEach(
-                ([key, value]) => {
-
-                    let displayValue;
-
-                    if (
-                        typeof value ===
-                        "object" &&
-                        value !== null
-                    ) {
-
-                        displayValue =
-                            JSON.stringify(
-                                value
-                            );
-
-                    } else {
-
-                        displayValue =
-                            value ?? "";
-                    }
-
-
-                    html += `
-
-                        <div class="field">
-
-                            <div class="field-name">
-                                ${escapeHtml(key)}
-                            </div>
-
-                            <div class="field-value">
-                                ${escapeHtml(
-                                    displayValue
-                                )}
-                            </div>
-
-                        </div>
-
-                    `;
-                }
-            );
-
-
-            html += `
-
-                    </div>
-
-                </article>
-
-            `;
-
-
-            resultsBox.insertAdjacentHTML(
-                "beforeend",
-                html
-            );
-
-        }
-    );
-}
-
-
-async function performSearch() {
-
-    const numbers =
-        numbersInput.value.trim();
-
-
-    if (!numbers) {
-
-        setStatus(
-            "Please enter a number.",
-            "error"
-        );
-
-        numbersInput.focus();
-
-        return;
-    }
-
-
-    showLoading();
 
 
     try {
@@ -308,21 +223,34 @@ async function performSearch() {
 
                     headers: {
                         "Content-Type":
+                            "application/json",
+                        "Accept":
                             "application/json"
                     },
 
                     body: JSON.stringify({
-                        numbers: numbers
+                        numbers: value
                     })
                 }
             );
 
 
         const data =
-            await response.json();
+            await readResponse(
+                response
+            );
 
 
-        if (!response.ok || !data.ok) {
+        if (!response.ok) {
+
+            throw new Error(
+                data.message ||
+                "Search request failed."
+            );
+        }
+
+
+        if (!data.ok) {
 
             throw new Error(
                 data.message ||
@@ -331,67 +259,157 @@ async function performSearch() {
         }
 
 
-        summaryBox.classList.remove(
-            "hidden"
-        );
-
-
-        summaryBox.innerHTML = `
+        summary.innerHTML = `
 
             <div>
                 Searched:
-                <strong>
-                    ${data.searched}
-                </strong>
+                <b>${escapeHTML(
+                    data.searched
+                )}</b>
             </div>
 
             <div>
                 Found:
-                <strong>
-                    ${data.found}
-                </strong>
+                <b>${escapeHTML(
+                    data.found
+                )}</b>
             </div>
-
-            ${
-                data.invalid.length
-                ?
-                `
-                    <div>
-                        Invalid:
-                        <strong>
-                            ${data.invalid.length}
-                        </strong>
-                    </div>
-                `
-                :
-                ""
-            }
 
         `;
 
 
-        if (data.found > 0) {
+        if (
+            !Array.isArray(
+                data.results
+            )
+        ) {
 
-            setStatus(
-                `${data.found} result(s) found.`,
-                "success"
-            );
-
-        } else {
-
-            setStatus(
-                "No matching result found.",
-                "warning"
+            throw new Error(
+                "Invalid results received."
             );
         }
 
 
-        renderResults(data);
+        if (
+            data.results.length === 0
+        ) {
+
+            results.innerHTML = `
+
+                <div class="empty">
+
+                    <div class="icon">
+                        🔎
+                    </div>
+
+                    <h2>
+                        No Result Found
+                    </h2>
+
+                    <p>
+                        No matching record found.
+                    </p>
+
+                </div>
+
+            `;
+
+            setStatus(
+                "No result found.",
+                "warning"
+            );
+
+            return;
+        }
+
+
+        setStatus(
+            `${data.found} result(s) found.`,
+            "success"
+        );
+
+
+        data.results.forEach(
+            (record, index) => {
+
+                let fields = "";
+
+                Object.entries(
+                    record
+                ).forEach(
+                    ([key, value]) => {
+
+                        let displayValue;
+
+                        if (
+                            typeof value ===
+                            "object" &&
+                            value !== null
+                        ) {
+
+                            displayValue =
+                                JSON.stringify(
+                                    value
+                                );
+
+                        } else {
+
+                            displayValue =
+                                value ?? "";
+                        }
+
+
+                        fields += `
+
+                            <div class="field">
+
+                                <div class="field-key">
+                                    ${escapeHTML(key)}
+                                </div>
+
+                                <div class="field-value">
+                                    ${escapeHTML(
+                                        displayValue
+                                    )}
+                                </div>
+
+                            </div>
+
+                        `;
+                    }
+                );
+
+
+                results.insertAdjacentHTML(
+                    "beforeend",
+
+                    `
+
+                    <div class="result-card">
+
+                        <div class="result-title">
+                            RESULT ${index + 1}
+                        </div>
+
+                        <div class="fields">
+                            ${fields}
+                        </div>
+
+                    </div>
+
+                    `
+                );
+
+            }
+        );
 
 
     } catch (error) {
 
-        console.error(error);
+        console.error(
+            "SEARCH ERROR:",
+            error
+        );
 
         setStatus(
             error.message ||
@@ -399,37 +417,35 @@ async function performSearch() {
             "error"
         );
 
-
     } finally {
 
-        stopLoading();
+        button.disabled = false;
+
+        button.textContent =
+            "SEARCH";
     }
 }
 
 
-searchButton.addEventListener(
-    "click",
-    performSearch
-);
+document
+    .getElementById("numbers")
+    .addEventListener(
+        "keydown",
+        function(event) {
 
+            if (
+                event.ctrlKey &&
+                event.key === "Enter"
+            ) {
 
-numbersInput.addEventListener(
-    "keydown",
-    event => {
+                searchNumbers();
+            }
 
-        if (
-            (event.ctrlKey ||
-             event.metaKey) &&
-            event.key === "Enter"
-        ) {
-
-            performSearch();
         }
-
-    }
-);
+    );
 
 </script>
 
 </body>
+
 </html>
