@@ -1,1 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
 
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="description"
+        content="KRUTIK CYBER EXPERT API Search"
+    >
+
+    <title>
+        KRUTIK CYBER EXPERT API
+    </title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+
+</head>
+
+<body>
+
+<div class="page">
+
+    <header class="header">
+
+        <div class="brand">
+            KRUTIK CYBER EXPERT API
+        </div>
+
+        <h1>
+            Number Search
+        </h1>
+
+        <p>
+            Search authorized dataset records
+        </p>
+
+    </header>
+
+
+    <section class="search-box">
+
+        <label for="numbers">
+            Enter Number(s)
+        </label>
+
+        <textarea
+            id="numbers"
+            placeholder="9876543210
+9123456789
+9988776655"
+            autocomplete="off"
+        ></textarea>
+
+        <div class="help">
+            Multiple numbers can be entered using
+            new lines, spaces, commas or semicolons.
+        </div>
+
+        <button
+            id="searchButton"
+            type="button"
+        >
+            SEARCH
+        </button>
+
+        <div
+            id="status"
+            class="status"
+        ></div>
+
+    </section>
+
+
+    <section
+        id="summary"
+        class="summary hidden"
+    ></section>
+
+
+    <section
+        id="results"
+        class="results"
+    ></section>
+
+</div>
+
+
+<script>
+
+const numbersInput =
+    document.getElementById("numbers");
+
+const searchButton =
+    document.getElementById("searchButton");
+
+const statusBox =
+    document.getElementById("status");
+
+const summaryBox =
+    document.getElementById("summary");
+
+const resultsBox =
+    document.getElementById("results");
+
+
+function escapeHtml(value) {
+
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+
+function setStatus(
+    message,
+    type = ""
+) {
+
+    statusBox.className =
+        "status " + type;
+
+    statusBox.textContent =
+        message;
+}
+
+
+function showLoading() {
+
+    searchButton.disabled = true;
+
+    searchButton.textContent =
+        "SEARCHING...";
+
+    setStatus(
+        "Searching...",
+        "loading"
+    );
+
+    summaryBox.classList.add(
+        "hidden"
+    );
+
+    resultsBox.innerHTML = "";
+}
+
+
+function stopLoading() {
+
+    searchButton.disabled = false;
+
+    searchButton.textContent =
+        "SEARCH";
+}
+
+
+function renderResults(data) {
+
+    resultsBox.innerHTML = "";
+
+    if (!data.results.length) {
+
+        resultsBox.innerHTML = `
+            <div class="empty">
+
+                <div class="empty-icon">
+                    🔎
+                </div>
+
+                <h2>
+                    No Result Found
+                </h2>
+
+                <p>
+                    No matching record was found.
+                </p>
+
+            </div>
+        `;
+
+        return;
+    }
+
+
+    data.results.forEach(
+        (record, index) => {
+
+            const fields =
+                Object.entries(record);
+
+            let html = `
+
+                <article class="result-card">
+
+                    <div class="result-number">
+                        RESULT ${index + 1}
+                    </div>
+
+                    <div class="fields">
+
+            `;
+
+
+            fields.forEach(
+                ([key, value]) => {
+
+                    let displayValue;
+
+                    if (
+                        typeof value ===
+                        "object" &&
+                        value !== null
+                    ) {
+
+                        displayValue =
+                            JSON.stringify(
+                                value
+                            );
+
+                    } else {
+
+                        displayValue =
+                            value ?? "";
+                    }
+
+
+                    html += `
+
+                        <div class="field">
+
+                            <div class="field-name">
+                                ${escapeHtml(key)}
+                            </div>
+
+                            <div class="field-value">
+                                ${escapeHtml(
+                                    displayValue
+                                )}
+                            </div>
+
+                        </div>
+
+                    `;
+                }
+            );
+
+
+            html += `
+
+                    </div>
+
+                </article>
+
+            `;
+
+
+            resultsBox.insertAdjacentHTML(
+                "beforeend",
+                html
+            );
+
+        }
+    );
+}
+
+
+async function performSearch() {
+
+    const numbers =
+        numbersInput.value.trim();
+
+
+    if (!numbers) {
+
+        setStatus(
+            "Please enter a number.",
+            "error"
+        );
+
+        numbersInput.focus();
+
+        return;
+    }
+
+
+    showLoading();
+
+
+    try {
+
+        const response =
+            await fetch(
+                "/search",
+                {
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body: JSON.stringify({
+                        numbers: numbers
+                    })
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        if (!response.ok || !data.ok) {
+
+            throw new Error(
+                data.message ||
+                "Search failed."
+            );
+        }
+
+
+        summaryBox.classList.remove(
+            "hidden"
+        );
+
+
+        summaryBox.innerHTML = `
+
+            <div>
+                Searched:
+                <strong>
+                    ${data.searched}
+                </strong>
+            </div>
+
+            <div>
+                Found:
+                <strong>
+                    ${data.found}
+                </strong>
+            </div>
+
+            ${
+                data.invalid.length
+                ?
+                `
+                    <div>
+                        Invalid:
+                        <strong>
+                            ${data.invalid.length}
+                        </strong>
+                    </div>
+                `
+                :
+                ""
+            }
+
+        `;
+
+
+        if (data.found > 0) {
+
+            setStatus(
+                `${data.found} result(s) found.`,
+                "success"
+            );
+
+        } else {
+
+            setStatus(
+                "No matching result found.",
+                "warning"
+            );
+        }
+
+
+        renderResults(data);
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        setStatus(
+            error.message ||
+            "Something went wrong.",
+            "error"
+        );
+
+
+    } finally {
+
+        stopLoading();
+    }
+}
+
+
+searchButton.addEventListener(
+    "click",
+    performSearch
+);
+
+
+numbersInput.addEventListener(
+    "keydown",
+    event => {
+
+        if (
+            (event.ctrlKey ||
+             event.metaKey) &&
+            event.key === "Enter"
+        ) {
+
+            performSearch();
+        }
+
+    }
+);
+
+</script>
+
+</body>
+</html>
