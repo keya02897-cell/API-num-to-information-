@@ -3,29 +3,17 @@ import json
 import re
 import sqlite3
 import hashlib
-import threading
 from pathlib import Path
-
-from flask import Flask, jsonify, render_template, request
-
-
-# ============================================================
-# KRUTIK CYBER EXPERT
-# HIGH SPEED JSON SEARCH
-# ============================================================
-
-app = Flask(__name__)
+from flask import Flask, request, jsonify, render_template, abort
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 INDEX_DIR = BASE_DIR / "index"
 DB_PATH = INDEX_DIR / "search.db"
 
-MAX_NUMBERS = 100
+APP_NAME = "KRUTIK CYBER EXPERT API"
 
-INDEX_DIR.mkdir(parents=True, exist_ok=True)
-
-index_lock = threading.Lock()
+app = Flask(__name__, template_folder="templates", static_folder="static")
 
 
 # ============================================================
@@ -35,140 +23,150 @@ index_lock = threading.Lock()
 def get_db():
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(
+    db = sqlite3.connect(
         str(DB_PATH),
-        timeout=120,
+        timeout=60,
         check_same_thread=False
     )
 
-    conn.row_factory = sqlite3.Row
+    db.row_factory = sqlite3.Row
 
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.execute("PRAGMA cache_size=-50000")
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mobile TEXT NOT NULL,
+            record_json TEXT NOT NULL
+        )
+    """)
 
-    return conn
+    db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_mobile
+        ON records(mobile)
+    """)
 
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
 
-def create_database():
-    conn = get_db()
-
-    try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                mobile TEXT NOT NULL,
-                record_json TEXT NOT NULL
-            )
-        """)
-
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_records_mobile
-            ON records(mobile)
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        """)
-
-        conn.commit()
-
-    finally:
-        conn.close()
-
-
-def get_meta(key):
-    create_database()
-
-    conn = get_db()
-
-    try:
-        row = conn.execute(
-            "SELECT value FROM metadata WHERE key = ?",
-            (key,)
-        ).fetchone()
-
-        return row["value"] if row else None
-
-    finally:
-        conn.close()
-
-
-def set_meta(key, value):
-    create_database()
-
-    conn = get_db()
-
-    try:
-        conn.execute("""
-            INSERT INTO metadata(key, value)
-            VALUES (?, ?)
-            ON CONFLICT(key)
-            DO UPDATE SET value = excluded.value
-        """, (key, str(value)))
-
-        conn.commit()
-
-    finally:
-        conn.close()
+    db.commit()
+    return db
 
 
 # ============================================================
-# NUMBER
+# NUMBER NORMALIZATION
 # ============================================================
 
 def normalize_number(value):
     if value is None:
         return ""
 
-    return re.sub(r"\D", "", str(value))
+    value = str(value).strip()
+
+    # Keep digits only
+    value = re.sub(r"\D", "", value)
+
+    # Indian +91 numbers
+    if len(value) == 12 and value.startswith("91"):
+        value = value[2:]
+
+    if len(value) == 11 and value.startswith("0"):
+        value = value[1:]
+
+    return value
 
 
-def extract_numbers(value):
-    if isinstance(value, list):
-        parts = value
-    else:
-        parts = re.split(
-            r"[\s,;]+",
-            str(value or "")
-        )
+def extract_numbers(text):
+    if not text:
+        return []
 
-    result = []
+    # newline / comma / semicolon / space separated
+    parts = re.split(r"[\s,;]+", text.strip())
+
+    numbers = []
 
     for part in parts:
         number = normalize_number(part)
 
-        if number and number not in result:
-            result.append(number)
+        if number and number not in numbers:
+            numbers.append(number)
 
-    return result
+    return numbers
 
 
 # ============================================================
-# JSON FILE DISCOVERY
+# JSON PARSER
 # ============================================================
 
-def get_json_files():
-    """
-    Recursive search.
+def parse_json_file(path):
+    try:
+        raw = path.read_text(
+            encoding="utf-8-sig",
+            errors="ignore"
+        ).strip()
 
-    So this also works:
+        if not raw:
+            return []
 
-    data/a.json
-    data/folder1/b.json
-    data/folder2/c.json
-    """
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
 
-    if not DATA_DIR.exists():
+            # JSON Lines fallback
+            records = []
+
+            for line in raw.splitlines():
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    obj = json.loads(line)
+
+                    if isinstance(obj, dict):
+                        records.append(obj)
+
+                except Exception:
+                    continue
+
+            return records
+
+        # Direct list
+        if isinstance(data, list):
+            return [
+                x for x in data
+                if isinstance(x, dict)
+            ]
+
+        # Common wrappers
+        if isinstance(data, dict):
+
+            for key in (
+                "data",
+                "records",
+                "results",
+                "items"
+            ):
+                value = data.get(key)
+
+                if isinstance(value, list):
+                    return [
+                        x for x in value
+                        if isinstance(x, dict)
+                    ]
+
+            # Single record
+            if isinstance(data, dict):
+                return [data]
+
         return []
 
-    return sorted(
-        DATA_DIR.rglob("*.json")
-    )
+    except Exception as e:
+        print(f"[FILE ERROR] {path}: {e}")
+        return []
 
 
 # ============================================================
@@ -176,848 +174,527 @@ def get_json_files():
 # ============================================================
 
 def get_data_signature():
-    files = get_json_files()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not files:
-        return "NO_JSON_FILES"
+    files = sorted(DATA_DIR.rglob("*.json"))
 
     parts = []
 
     for path in files:
-
         try:
             stat = path.stat()
 
-            relative = path.relative_to(
-                DATA_DIR
+            relative = str(
+                path.relative_to(DATA_DIR)
             )
 
             parts.append(
-                f"{relative}|"
-                f"{stat.st_size}|"
-                f"{stat.st_mtime_ns}"
+                f"{relative}|{stat.st_size}|{stat.st_mtime_ns}"
             )
 
         except Exception:
-            continue
+            pass
 
     raw = "\n".join(parts)
 
     return hashlib.sha256(
-        raw.encode("utf-8")
+        raw.encode()
     ).hexdigest()
 
 
 # ============================================================
-# ROBUST JSON PARSER
+# INDEX
 # ============================================================
 
-def parse_json_content(content):
-    """
-    Supports:
+def rebuild_index():
 
-    1. Direct list
+    print("=" * 60)
+    print("BUILDING SEARCH INDEX")
+    print("=" * 60)
 
-       [
-         {...},
-         {...}
-       ]
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    2. data wrapper
-
-       {
-         "data": [...]
-       }
-
-    3. records wrapper
-
-       {
-         "records": [...]
-       }
-
-    4. results wrapper
-
-       {
-         "results": [...]
-       }
-
-    5. JSON string containing JSON
-
-    """
-
-    if isinstance(content, str):
-
-        stripped = content.strip()
-
-        if stripped:
-
-            try:
-                decoded = json.loads(
-                    stripped
-                )
-
-                return parse_json_content(
-                    decoded
-                )
-
-            except Exception:
-                pass
-
-        return []
-
-    if isinstance(content, list):
-
-        return [
-            x for x in content
-            if isinstance(x, dict)
-        ]
-
-    if isinstance(content, dict):
-
-        # Most common wrappers
-        for key in (
-            "data",
-            "records",
-            "results",
-            "items"
-        ):
-
-            value = content.get(key)
-
-            if isinstance(value, list):
-
-                return [
-                    x for x in value
-                    if isinstance(x, dict)
-                ]
-
-        # If dictionary itself looks like
-        # one record
-        if "mobile" in content:
-
-            return [content]
-
-        return []
-
-    return []
-
-
-def load_json_file(path):
-    """
-    Read one JSON file safely.
-    """
-
-    with path.open(
-        "r",
-        encoding="utf-8-sig"
-    ) as f:
-
-        raw = f.read()
-
-    if not raw.strip():
-        return []
+    db = get_db()
 
     try:
+        db.execute("DELETE FROM records")
+        db.execute("DELETE FROM meta")
+        db.commit()
 
-        content = json.loads(raw)
-
-    except json.JSONDecodeError:
-
-        # Sometimes data can contain a JSON
-        # document inside a quoted string.
-        content = raw
-
-    return parse_json_content(
-        content
-    )
-
-
-# ============================================================
-# INDEX CURRENT?
-# ============================================================
-
-def index_is_current():
-    create_database()
-
-    current = get_data_signature()
-    stored = get_meta("data_signature")
-    count = get_meta("record_count")
-
-    return (
-        stored is not None
-        and count is not None
-        and current == stored
-    )
-
-
-# ============================================================
-# BUILD INDEX
-# ============================================================
-
-def build_index(force=False):
-
-    with index_lock:
-
-        create_database()
-
-        files = get_json_files()
-
-        current_signature = (
-            get_data_signature()
-        )
-
-        if not force and index_is_current():
-
-            app.logger.info(
-                "INDEX ALREADY CURRENT"
-            )
-
-            return True
-
-        app.logger.info("=" * 70)
-        app.logger.info(
-            "KRUTIK CYBER EXPERT - INDEX BUILD"
-        )
-        app.logger.info("=" * 70)
-
-        app.logger.info(
-            "BASE DIR: %s",
-            BASE_DIR
-        )
-
-        app.logger.info(
-            "DATA DIR: %s",
-            DATA_DIR
-        )
-
-        app.logger.info(
-            "JSON FILES FOUND: %d",
-            len(files)
-        )
-
-        conn = get_db()
+        files = sorted(DATA_DIR.rglob("*.json"))
 
         total_records = 0
-        indexed_records = 0
+        mobile_records = 0
         failed_files = 0
-        files_with_records = 0
-        files_without_records = 0
-
-        file_report = []
-
-        try:
-
-            conn.execute("BEGIN")
-
-            conn.execute(
-                "DELETE FROM records"
-            )
-
-            for path in files:
-
-                try:
-
-                    relative_name = str(
-                        path.relative_to(
-                            DATA_DIR
-                        )
-                    )
-
-                    app.logger.info(
-                        "[READING] %s",
-                        relative_name
-                    )
-
-                    records = load_json_file(
-                        path
-                    )
-
-                    record_count = len(
-                        records
-                    )
-
-                    total_records += (
-                        record_count
-                    )
-
-                    if record_count > 0:
-
-                        files_with_records += 1
-
-                    else:
-
-                        files_without_records += 1
-
-                    valid_mobile = 0
-
-                    batch = []
-
-                    for record in records:
-
-                        mobile = normalize_number(
-                            record.get(
-                                "mobile"
-                            )
-                        )
-
-                        if not mobile:
-                            continue
-
-                        valid_mobile += 1
-
-                        record_json = json.dumps(
-                            record,
-                            ensure_ascii=False,
-                            separators=(
-                                ",",
-                                ":"
-                            )
-                        )
-
-                        batch.append(
-                            (
-                                mobile,
-                                record_json
-                            )
-                        )
-
-                    if batch:
-
-                        conn.executemany(
-                            """
-                            INSERT INTO records(
-                                mobile,
-                                record_json
-                            )
-                            VALUES (?, ?)
-                            """,
-                            batch
-                        )
-
-                        indexed_records += len(
-                            batch
-                        )
-
-                    file_report.append({
-                        "file": relative_name,
-                        "records": record_count,
-                        "mobile_records": valid_mobile
-                    })
-
-                    app.logger.info(
-                        "[OK] %s | records=%d | mobile=%d",
-                        relative_name,
-                        record_count,
-                        valid_mobile
-                    )
-
-                except Exception as exc:
-
-                    failed_files += 1
-
-                    file_report.append({
-                        "file": str(
-                            path.relative_to(
-                                DATA_DIR
-                            )
-                        ),
-                        "records": 0,
-                        "mobile_records": 0,
-                        "error": str(exc)
-                    })
-
-                    app.logger.exception(
-                        "[FILE ERROR] %s",
-                        path.name
-                    )
-
-            # ------------------------------------------------
-            # Metadata
-            # ------------------------------------------------
-
-            metadata = {
-                "data_signature":
-                    current_signature,
-
-                "record_count":
-                    indexed_records,
-
-                "total_records":
-                    total_records,
-
-                "failed_files":
-                    failed_files,
-
-                "files_with_records":
-                    files_with_records,
-
-                "files_without_records":
-                    files_without_records
-            }
-
-            for key, value in metadata.items():
-
-                conn.execute("""
-                    INSERT INTO metadata(
-                        key,
-                        value
-                    )
-                    VALUES (?, ?)
-
-                    ON CONFLICT(key)
-                    DO UPDATE SET
-                        value = excluded.value
-                """, (
-                    key,
-                    str(value)
-                ))
-
-            conn.commit()
-
-            app.logger.info("=" * 70)
-            app.logger.info(
-                "INDEX BUILD COMPLETE"
-            )
-            app.logger.info(
-                "FILES: %d",
-                len(files)
-            )
-            app.logger.info(
-                "TOTAL RECORDS: %d",
-                total_records
-            )
-            app.logger.info(
-                "MOBILE RECORDS: %d",
-                indexed_records
-            )
-            app.logger.info(
-                "FAILED FILES: %d",
-                failed_files
-            )
-            app.logger.info("=" * 70)
-
-            return True
-
-        except Exception:
-
-            conn.rollback()
-
-            app.logger.exception(
-                "INDEX BUILD FAILED"
-            )
-
-            return False
-
-        finally:
-
-            conn.close()
-
-
-# ============================================================
-# FAST SEARCH
-# ============================================================
-
-def search_database(numbers):
-
-    if not numbers:
-        return []
-
-    conn = get_db()
-
-    try:
-
-        placeholders = ",".join(
-            "?" for _ in numbers
-        )
-
-        sql = f"""
-            SELECT mobile, record_json
-            FROM records
-            WHERE mobile IN ({placeholders})
-        """
-
-        rows = conn.execute(
-            sql,
-            numbers
-        ).fetchall()
-
-        results = []
-
-        for row in rows:
-
-            try:
-
-                record = json.loads(
-                    row["record_json"]
-                )
-
-                results.append(
-                    record
-                )
-
-            except Exception:
-                continue
-
-        return results
-
-    finally:
-
-        conn.close()
-
-
-# ============================================================
-# INITIALIZATION
-# ============================================================
-
-def initialize():
-
-    try:
-
-        create_database()
-
-        app.logger.info(
-            "DATABASE READY"
-        )
-
-    except Exception:
-
-        app.logger.exception(
-            "DATABASE INITIALIZATION ERROR"
-        )
-
-
-initialize()
-
-
-# ============================================================
-# HOME
-# ============================================================
-
-@app.route("/")
-def home():
-
-    return render_template(
-        "index.html"
-    )
-
-
-# ============================================================
-# HEALTH
-# ============================================================
-
-@app.route("/health")
-def health():
-
-    try:
-
-        create_database()
-
-        files = get_json_files()
-
-        record_count = int(
-            get_meta(
-                "record_count"
-            ) or 0
-        )
-
-        return jsonify({
-            "ok": True,
-            "status": "online",
-            "json_files": len(files),
-            "index_ready":
-                index_is_current(),
-            "indexed_records":
-                record_count
-        })
-
-    except Exception as exc:
-
-        app.logger.exception(
-            "HEALTH ERROR"
-        )
-
-        return jsonify({
-            "ok": False,
-            "status": "error",
-            "error": str(exc)
-        }), 500
-
-
-# ============================================================
-# STATUS / DIAGNOSTICS
-# ============================================================
-
-@app.route("/status")
-def status():
-
-    try:
-
-        create_database()
-
-        files = get_json_files()
-
-        report = []
 
         for path in files:
 
-            item = {
-                "file": str(
-                    path.relative_to(
-                        DATA_DIR
+            print(f"[READING] {path}")
+
+            records = parse_json_file(path)
+
+            if not records:
+                print(
+                    f"[EMPTY] {path.name} -> 0 records"
+                )
+
+            file_count = 0
+            file_mobile_count = 0
+
+            rows = []
+
+            for record in records:
+
+                total_records += 1
+                file_count += 1
+
+                mobile = normalize_number(
+                    record.get("mobile", "")
+                )
+
+                if not mobile:
+                    continue
+
+                # Store only server-side.
+                # Browser never receives database directly.
+                record_copy = dict(record)
+
+                record_copy["_dataset"] = path.name
+
+                rows.append(
+                    (
+                        mobile,
+                        json.dumps(
+                            record_copy,
+                            ensure_ascii=False,
+                            separators=(",", ":")
+                        )
                     )
                 )
-            }
 
-            try:
+                mobile_records += 1
+                file_mobile_count += 1
 
-                records = load_json_file(
-                    path
+            if rows:
+
+                db.executemany(
+                    """
+                    INSERT INTO records
+                    (mobile, record_json)
+                    VALUES (?, ?)
+                    """,
+                    rows
                 )
 
-                mobile_count = 0
+            print(
+                f"[OK] {path.name} | "
+                f"records={file_count} | "
+                f"mobile={file_mobile_count}"
+            )
 
-                for record in records:
+        signature = get_data_signature()
 
-                    if normalize_number(
-                        record.get(
-                            "mobile"
-                        )
-                    ):
-                        mobile_count += 1
-
-                item["records"] = len(
-                    records
-                )
-
-                item["mobile_records"] = (
-                    mobile_count
-                )
-
-                item["status"] = "ok"
-
-            except Exception as exc:
-
-                item["records"] = 0
-                item["mobile_records"] = 0
-                item["status"] = "error"
-                item["error"] = str(exc)
-
-            report.append(item)
-
-        return jsonify({
-            "ok": True,
-
-            "json_files": len(files),
-
-            "index_ready":
-                index_is_current(),
-
-            "indexed_records": int(
-                get_meta(
-                    "record_count"
-                ) or 0
-            ),
-
-            "total_records": int(
-                get_meta(
-                    "total_records"
-                ) or 0
-            ),
-
-            "failed_files": int(
-                get_meta(
-                    "failed_files"
-                ) or 0
-            ),
-
-            "files": report
-        })
-
-    except Exception as exc:
-
-        app.logger.exception(
-            "STATUS ERROR"
+        db.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES (?, ?)
+            """,
+            ("signature", signature)
         )
 
-        return jsonify({
-            "ok": False,
-            "error": str(exc)
-        }), 500
+        db.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES (?, ?)
+            """,
+            ("indexed_records", str(total_records))
+        )
+
+        db.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES (?, ?)
+            """,
+            ("mobile_records", str(mobile_records))
+        )
+
+        db.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES (?, ?)
+            """,
+            ("json_files", str(len(files)))
+        )
+
+        db.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES (?, ?)
+            """,
+            ("failed_files", str(failed_files))
+        )
+
+        db.commit()
+
+        print("=" * 60)
+        print("INDEX READY")
+        print(f"JSON files     : {len(files)}")
+        print(f"Records        : {total_records}")
+        print(f"Mobile records : {mobile_records}")
+        print("=" * 60)
+
+        return {
+            "json_files": len(files),
+            "total_records": total_records,
+            "mobile_records": mobile_records,
+            "failed_files": failed_files
+        }
+
+    finally:
+        db.close()
 
 
-# ============================================================
-# FORCE REBUILD
-# ============================================================
+def index_is_ready():
 
-@app.route(
-    "/rebuild",
-    methods=["POST"]
-)
-def rebuild():
+    if not DB_PATH.exists():
+        return False
 
     try:
+        db = get_db()
 
-        success = build_index(
-            force=True
-        )
+        row = db.execute(
+            """
+            SELECT value
+            FROM meta
+            WHERE key='signature'
+            """
+        ).fetchone()
 
-        if not success:
+        if not row:
+            db.close()
+            return False
 
-            return jsonify({
-                "ok": False,
-                "error":
-                    "Index rebuild failed"
-            }), 500
+        current = get_data_signature()
 
-        return jsonify({
-            "ok": True,
-            "message":
-                "Index rebuilt successfully",
-            "indexed_records": int(
-                get_meta(
-                    "record_count"
-                ) or 0
-            )
-        })
+        ready = row["value"] == current
 
-    except Exception as exc:
+        db.close()
 
-        app.logger.exception(
-            "REBUILD ERROR"
-        )
+        return ready
 
-        return jsonify({
-            "ok": False,
-            "error": str(exc)
-        }), 500
+    except Exception:
+        return False
+
+
+def ensure_index():
+
+    if not index_is_ready():
+        rebuild_index()
 
 
 # ============================================================
 # SEARCH
 # ============================================================
 
-@app.route(
-    "/search",
-    methods=["POST"]
-)
+def search_numbers(numbers):
+
+    if not numbers:
+        return []
+
+    ensure_index()
+
+    db = get_db()
+
+    try:
+        placeholders = ",".join(
+            ["?"] * len(numbers)
+        )
+
+        query = f"""
+            SELECT mobile, record_json
+            FROM records
+            WHERE mobile IN ({placeholders})
+        """
+
+        rows = db.execute(
+            query,
+            numbers
+        ).fetchall()
+
+        found = {}
+
+        for row in rows:
+
+            mobile = row["mobile"]
+
+            try:
+                record = json.loads(
+                    row["record_json"]
+                )
+
+            except Exception:
+                continue
+
+            found.setdefault(
+                mobile,
+                []
+            ).append(record)
+
+        results = []
+
+        for number in numbers:
+
+            matches = found.get(
+                number,
+                []
+            )
+
+            if matches:
+                results.append({
+                    "number": number,
+                    "found": True,
+                    "results": matches
+                })
+            else:
+                results.append({
+                    "number": number,
+                    "found": False,
+                    "results": []
+                })
+
+        return results
+
+    finally:
+        db.close()
+
+
+# ============================================================
+# ROUTES
+# ============================================================
+
+@app.route("/")
+def home():
+    return render_template(
+        "index.html",
+        app_name=APP_NAME
+    )
+
+
+@app.route("/health", methods=["GET", "HEAD"])
+def health():
+
+    try:
+        db = get_db()
+
+        files = list(
+            DATA_DIR.rglob("*.json")
+        ) if DATA_DIR.exists() else []
+
+        row = db.execute(
+            """
+            SELECT value
+            FROM meta
+            WHERE key='mobile_records'
+            """
+        ).fetchone()
+
+        mobile_records = (
+            int(row["value"])
+            if row else 0
+        )
+
+        db.close()
+
+        return jsonify({
+            "ok": True,
+            "status": "online",
+            "json_files": len(files),
+            "index_ready": index_is_ready(),
+            "indexed_mobile_records": mobile_records
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "ok": False,
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+
+@app.route("/status")
+def status():
+
+    try:
+
+        files = sorted(
+            DATA_DIR.rglob("*.json")
+        ) if DATA_DIR.exists() else []
+
+        db = get_db()
+
+        row = db.execute(
+            """
+            SELECT value
+            FROM meta
+            WHERE key='indexed_records'
+            """
+        ).fetchone()
+
+        indexed_records = (
+            int(row["value"])
+            if row else 0
+        )
+
+        row = db.execute(
+            """
+            SELECT value
+            FROM meta
+            WHERE key='mobile_records'
+            """
+        ).fetchone()
+
+        mobile_records = (
+            int(row["value"])
+            if row else 0
+        )
+
+        db.close()
+
+        return jsonify({
+            "ok": True,
+            "json_files": len(files),
+            "index_ready": index_is_ready(),
+            "indexed_records": indexed_records,
+            "indexed_mobile_records": mobile_records
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/rebuild", methods=["POST"])
+def rebuild():
+
+    try:
+
+        result = rebuild_index()
+
+        return jsonify({
+            "ok": True,
+            "message": "Index rebuilt successfully",
+            **result
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/search", methods=["POST"])
 def search():
 
     try:
 
-        body = request.get_json(
-            silent=True
-        )
+        # JSON request
+        if request.is_json:
 
-        if not isinstance(
-            body,
-            dict
-        ):
+            body = request.get_json(
+                silent=True
+            ) or {}
 
-            return jsonify({
-                "ok": False,
-                "error":
-                    "Invalid JSON request"
-            }), 400
-
-        numbers = extract_numbers(
-            body.get(
-                "numbers"
+            raw_numbers = body.get(
+                "numbers",
+                body.get("number", "")
             )
-        )
+
+        else:
+
+            raw_numbers = request.form.get(
+                "numbers",
+                request.form.get("number", "")
+            )
+
+        if isinstance(raw_numbers, list):
+
+            text = " ".join(
+                str(x)
+                for x in raw_numbers
+            )
+
+        else:
+            text = str(raw_numbers)
+
+        numbers = extract_numbers(text)
 
         if not numbers:
 
             return jsonify({
                 "ok": False,
-                "error":
-                    "Enter at least one number"
+                "error": "Please enter at least one number."
             }), 400
 
-        if len(numbers) > MAX_NUMBERS:
+        if len(numbers) > 100:
 
             return jsonify({
                 "ok": False,
-                "error":
-                    f"Maximum {MAX_NUMBERS} numbers allowed"
+                "error": "Maximum 100 numbers per request."
             }), 400
 
-        # Build index only when required.
-        if not index_is_current():
+        results = search_numbers(numbers)
 
-            app.logger.info(
-                "INDEX NOT READY"
-            )
-
-            app.logger.info(
-                "BUILDING INDEX..."
-            )
-
-            if not build_index():
-
-                return jsonify({
-                    "ok": False,
-                    "error":
-                        "Could not build search index"
-                }), 500
-
-        results = search_database(
-            numbers
+        found_count = sum(
+            1
+            for item in results
+            if item["found"]
         )
 
         return jsonify({
             "ok": True,
             "searched": len(numbers),
-            "found": len(results),
+            "found": found_count,
             "results": results
         })
 
-    except Exception as exc:
+    except Exception as e:
 
-        app.logger.exception(
-            "SEARCH ERROR"
+        print(
+            f"[SEARCH ERROR] {e}"
         )
 
         return jsonify({
             "ok": False,
-            "error":
-                "Internal Server Error",
-            "details": str(exc)
+            "error": "Search failed."
         }), 500
 
 
 # ============================================================
-# BLOCK DATA DOWNLOAD
+# BLOCK DIRECT DATA ACCESS
 # ============================================================
 
-@app.route("/data")
-@app.route("/data/")
 @app.route("/data/<path:filename>")
-def block_data(filename=None):
-
-    return jsonify({
-        "ok": False,
-        "error": "Access denied"
-    }), 403
+def block_data(filename):
+    abort(404)
 
 
-# ============================================================
-# BLOCK INDEX DOWNLOAD
-# ============================================================
-
-@app.route("/index")
-@app.route("/index/")
 @app.route("/index/<path:filename>")
-def block_index(filename=None):
-
-    return jsonify({
-        "ok": False,
-        "error": "Access denied"
-    }), 403
+def block_index(filename):
+    abort(404)
 
 
 # ============================================================
-# LOCAL
+# STARTUP
 # ============================================================
+
+get_db().close()
+
 
 if __name__ == "__main__":
 
@@ -1027,37 +704,6 @@ if __name__ == "__main__":
             5000
         )
     )
-
-    print("=" * 70)
-    print(
-        "KRUTIK CYBER EXPERT"
-    )
-    print(
-        "HIGH SPEED JSON SEARCH"
-    )
-    print("=" * 70)
-
-    print(
-        "BASE:",
-        BASE_DIR
-    )
-
-    print(
-        "DATA:",
-        DATA_DIR
-    )
-
-    print(
-        "DATABASE:",
-        DB_PATH
-    )
-
-    print(
-        "JSON FILES:",
-        len(get_json_files())
-    )
-
-    print("=" * 70)
 
     app.run(
         host="0.0.0.0",
