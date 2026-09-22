@@ -2,5 +2,13 @@ services:
   - type: web
     name: krutik-cyber-expert-api
     runtime: python
+
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT website:app
+
+    startCommand: gunicorn --workers 1 --bind 0.0.0.0:$PORT --timeout 120 website:app
+
+    healthCheckPath: /health
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
