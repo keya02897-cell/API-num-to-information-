@@ -11,7 +11,7 @@ from flask import Flask, jsonify, render_template, request
 
 # ============================================================
 # KRUTIK CYBER EXPERT
-# HIGH-SPEED JSON SEARCH WEBSITE
+# HIGH SPEED JSON SEARCH API
 # ============================================================
 
 app = Flask(__name__)
@@ -33,6 +33,15 @@ _index_lock = threading.Lock()
 # ============================================================
 
 def get_db():
+    """
+    Open SQLite database.
+    """
+
+    INDEX_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
     conn = sqlite3.connect(
         str(DB_PATH),
         timeout=60,
@@ -41,19 +50,35 @@ def get_db():
 
     conn.row_factory = sqlite3.Row
 
-    # Faster reads
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.execute("PRAGMA cache_size=-50000")
+    # SQLite performance settings
+    conn.execute(
+        "PRAGMA journal_mode=WAL"
+    )
+
+    conn.execute(
+        "PRAGMA synchronous=NORMAL"
+    )
+
+    conn.execute(
+        "PRAGMA temp_store=MEMORY"
+    )
+
+    conn.execute(
+        "PRAGMA cache_size=-50000"
+    )
 
     return conn
 
 
 def create_database():
+    """
+    Always make sure database and tables exist.
+    """
+
     conn = get_db()
 
     try:
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +102,71 @@ def create_database():
         conn.commit()
 
     finally:
+
+        conn.close()
+
+
+# ============================================================
+# METADATA
+# ============================================================
+
+def get_metadata(key):
+    """
+    Get metadata value safely.
+    """
+
+    create_database()
+
+    conn = get_db()
+
+    try:
+
+        row = conn.execute(
+            """
+            SELECT value
+            FROM metadata
+            WHERE key = ?
+            """,
+            (key,)
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return row["value"]
+
+    finally:
+
+        conn.close()
+
+
+def set_metadata(key, value):
+    """
+    Store metadata.
+    """
+
+    create_database()
+
+    conn = get_db()
+
+    try:
+
+        conn.execute(
+            """
+            INSERT INTO metadata(key, value)
+            VALUES (?, ?)
+
+            ON CONFLICT(key)
+            DO UPDATE SET
+                value = excluded.value
+            """,
+            (key, str(value))
+        )
+
+        conn.commit()
+
+    finally:
+
         conn.close()
 
 
@@ -85,10 +175,28 @@ def create_database():
 # ============================================================
 
 def normalize_number(value):
+    """
+    Keep only numbers.
+
+    Example:
+
+    +91 93777-11765
+    ->
+    919377711765
+
+    9377711765
+    ->
+    9377711765
+    """
+
     if value is None:
         return ""
 
-    return re.sub(r"\D", "", str(value))
+    return re.sub(
+        r"\D",
+        "",
+        str(value)
+    )
 
 
 def extract_numbers(value):
@@ -108,45 +216,60 @@ def extract_numbers(value):
     """
 
     if isinstance(value, list):
+
         parts = value
+
     else:
-        parts = re.split(r"[\s,;]+", str(value or ""))
+
+        parts = re.split(
+            r"[\s,;]+",
+            str(value or "")
+        )
 
     numbers = []
 
     for part in parts:
-        number = normalize_number(part)
+
+        number = normalize_number(
+            part
+        )
 
         if number and number not in numbers:
+
             numbers.append(number)
 
     return numbers
 
 
 # ============================================================
-# JSON FILE SIGNATURE
+# DATA SIGNATURE
 # ============================================================
 
 def get_data_signature():
     """
-    Creates a signature from JSON filenames + modification times +
-    file sizes.
+    Generate signature from all JSON files.
 
-    If data changes, the index will be rebuilt.
+    If files are changed, the index is rebuilt.
     """
 
     if not DATA_DIR.exists():
+
         return "NO_DATA_DIRECTORY"
 
-    files = sorted(DATA_DIR.glob("*.json"))
+    json_files = sorted(
+        DATA_DIR.glob("*.json")
+    )
 
-    if not files:
+    if not json_files:
+
         return "NO_JSON_FILES"
 
     parts = []
 
-    for file_path in files:
+    for file_path in json_files:
+
         try:
+
             stat = file_path.stat()
 
             parts.append(
@@ -156,6 +279,7 @@ def get_data_signature():
             )
 
         except OSError:
+
             continue
 
     raw = "\n".join(parts)
@@ -171,7 +295,7 @@ def get_data_signature():
 
 def load_json_file(file_path):
     """
-    Supports the exact format:
+    Supports:
 
     [
         {
@@ -201,109 +325,126 @@ def load_json_file(file_path):
         content = json.load(file)
 
     if isinstance(content, list):
+
         records = content
 
     elif isinstance(content, dict):
-        records = content.get("data", [])
+
+        records = content.get(
+            "data",
+            []
+        )
 
     else:
+
         return []
 
-    if not isinstance(records, list):
+    if not isinstance(
+        records,
+        list
+    ):
+
         return []
 
     return [
         record
         for record in records
-        if isinstance(record, dict)
+        if isinstance(
+            record,
+            dict
+        )
     ]
 
 
 # ============================================================
-# INDEX BUILD
+# INDEX STATUS
 # ============================================================
 
-def get_metadata(key):
-    conn = get_db()
-
-    try:
-        row = conn.execute(
-            "SELECT value FROM metadata WHERE key = ?",
-            (key,)
-        ).fetchone()
-
-        return row["value"] if row else None
-
-    finally:
-        conn.close()
-
-
-def set_metadata(key, value):
-    conn = get_db()
-
-    try:
-        conn.execute("""
-            INSERT INTO metadata(key, value)
-            VALUES (?, ?)
-            ON CONFLICT(key)
-            DO UPDATE SET value=excluded.value
-        """, (key, value))
-
-        conn.commit()
-
-    finally:
-        conn.close()
-
-
 def index_is_current():
-    current_signature = get_data_signature()
+    """
+    Check whether SQLite index matches
+    current JSON files.
+    """
 
-    stored_signature = get_metadata("data_signature")
+    # IMPORTANT:
+    # Make database before reading metadata.
+    create_database()
 
-    record_count = get_metadata("record_count")
+    current_signature = (
+        get_data_signature()
+    )
+
+    stored_signature = get_metadata(
+        "data_signature"
+    )
+
+    record_count = get_metadata(
+        "record_count"
+    )
+
+    if not stored_signature:
+        return False
+
+    if record_count is None:
+        return False
 
     return (
-        current_signature == stored_signature
-        and record_count is not None
+        current_signature
+        == stored_signature
     )
 
 
+# ============================================================
+# BUILD INDEX
+# ============================================================
+
 def build_index():
     """
-    Build SQLite index from all JSON files.
+    Convert JSON data into SQLite indexed database.
 
-    This happens only when:
-    - database doesn't exist
-    - JSON files changed
-    - index is missing
+    This does NOT happen for every search.
     """
 
     with _index_lock:
 
         create_database()
 
-        current_signature = get_data_signature()
+        current_signature = (
+            get_data_signature()
+        )
 
+        # Someone may have already built it.
         if index_is_current():
+
             app.logger.info(
-                "INDEX OK - using existing SQLite index"
+                "INDEX ALREADY CURRENT"
             )
+
             return True
 
-        app.logger.info("=" * 60)
         app.logger.info(
-            "BUILDING HIGH-SPEED SEARCH INDEX"
+            "=" * 60
         )
+
+        app.logger.info(
+            "BUILDING SEARCH INDEX"
+        )
+
         app.logger.info(
             "DATA DIRECTORY: %s",
             DATA_DIR
         )
-        app.logger.info("=" * 60)
+
+        app.logger.info(
+            "=" * 60
+        )
 
         if not DATA_DIR.exists():
+
             app.logger.error(
                 "DATA DIRECTORY NOT FOUND"
             )
+
             return False
 
         json_files = sorted(
@@ -318,9 +459,12 @@ def build_index():
         conn = get_db()
 
         try:
-            # Temporary transaction
-            conn.execute("BEGIN")
 
+            conn.execute(
+                "BEGIN"
+            )
+
+            # Remove old index
             conn.execute(
                 "DELETE FROM records"
             )
@@ -337,27 +481,37 @@ def build_index():
                 )
 
                 try:
+
                     records = load_json_file(
                         file_path
                     )
 
-                    total_records += len(records)
+                    total_records += (
+                        len(records)
+                    )
 
                     batch = []
 
                     for record in records:
 
                         mobile = normalize_number(
-                            record.get("mobile", "")
+                            record.get(
+                                "mobile",
+                                ""
+                            )
                         )
 
                         if not mobile:
+
                             continue
 
                         record_json = json.dumps(
                             record,
                             ensure_ascii=False,
-                            separators=(",", ":")
+                            separators=(
+                                ",",
+                                ":"
+                            )
                         )
 
                         batch.append(
@@ -368,6 +522,7 @@ def build_index():
                         )
 
                     if batch:
+
                         conn.executemany(
                             """
                             INSERT INTO records(
@@ -379,24 +534,31 @@ def build_index():
                             batch
                         )
 
-                        indexed_records += len(batch)
+                        indexed_records += (
+                            len(batch)
+                        )
 
                 except Exception as exc:
 
                     failed_files += 1
 
                     app.logger.exception(
-                        "[JSON ERROR] %s: %s",
-                        file_path.name,
-                        exc
+                        "[JSON ERROR] %s",
+                        file_path.name
                     )
 
+            # Save index metadata
             conn.execute(
                 """
-                INSERT INTO metadata(key, value)
+                INSERT INTO metadata(
+                    key,
+                    value
+                )
                 VALUES (?, ?)
+
                 ON CONFLICT(key)
-                DO UPDATE SET value=excluded.value
+                DO UPDATE SET
+                    value = excluded.value
                 """,
                 (
                     "data_signature",
@@ -406,66 +568,91 @@ def build_index():
 
             conn.execute(
                 """
-                INSERT INTO metadata(key, value)
+                INSERT INTO metadata(
+                    key,
+                    value
+                )
                 VALUES (?, ?)
+
                 ON CONFLICT(key)
-                DO UPDATE SET value=excluded.value
+                DO UPDATE SET
+                    value = excluded.value
                 """,
                 (
                     "record_count",
-                    str(indexed_records)
+                    indexed_records
                 )
             )
 
             conn.execute(
                 """
-                INSERT INTO metadata(key, value)
+                INSERT INTO metadata(
+                    key,
+                    value
+                )
                 VALUES (?, ?)
+
                 ON CONFLICT(key)
-                DO UPDATE SET value=excluded.value
+                DO UPDATE SET
+                    value = excluded.value
                 """,
                 (
                     "total_records",
-                    str(total_records)
+                    total_records
                 )
             )
 
             conn.execute(
                 """
-                INSERT INTO metadata(key, value)
+                INSERT INTO metadata(
+                    key,
+                    value
+                )
                 VALUES (?, ?)
+
                 ON CONFLICT(key)
-                DO UPDATE SET value=excluded.value
+                DO UPDATE SET
+                    value = excluded.value
                 """,
                 (
                     "failed_files",
-                    str(failed_files)
+                    failed_files
                 )
             )
 
             conn.commit()
 
-            app.logger.info("=" * 60)
+            app.logger.info(
+                "=" * 60
+            )
+
             app.logger.info(
                 "INDEX READY"
             )
+
             app.logger.info(
                 "FILES: %d",
                 len(json_files)
             )
+
             app.logger.info(
                 "TOTAL RECORDS: %d",
                 total_records
             )
+
             app.logger.info(
                 "INDEXED RECORDS: %d",
                 indexed_records
             )
+
             app.logger.info(
                 "FAILED FILES: %d",
                 failed_files
             )
-            app.logger.info("=" * 60)
+
+            app.logger.info(
+                "=" * 60
+            )
 
             return True
 
@@ -480,32 +667,37 @@ def build_index():
             return False
 
         finally:
+
             conn.close()
 
 
 # ============================================================
-# SEARCH
+# FAST SEARCH
 # ============================================================
 
 def search_database(numbers):
     """
-    Extremely fast indexed SQLite lookup.
+    Search only SQLite.
 
-    No JSON files are read during normal searches.
+    JSON files are NOT opened here.
     """
 
     if not numbers:
+
         return []
 
     conn = get_db()
 
     try:
+
         placeholders = ",".join(
-            "?" for _ in numbers
+            ["?"] * len(numbers)
         )
 
         query = f"""
-            SELECT mobile, record_json
+            SELECT
+                mobile,
+                record_json
             FROM records
             WHERE mobile IN ({placeholders})
         """
@@ -520,60 +712,141 @@ def search_database(numbers):
         for row in rows:
 
             try:
+
                 record = json.loads(
                     row["record_json"]
                 )
 
-                results.append(record)
+                results.append(
+                    record
+                )
 
             except Exception:
+
                 continue
 
         return results
 
     finally:
+
         conn.close()
 
 
 # ============================================================
-# ROUTES
+# APPLICATION STARTUP
+# ============================================================
+
+def initialize_app():
+    """
+    Safe initialization for Gunicorn/Render.
+
+    Gunicorn imports:
+        website:app
+
+    So this function is called during import.
+    """
+
+    try:
+
+        create_database()
+
+        app.logger.info(
+            "DATABASE INITIALIZED"
+        )
+
+        # IMPORTANT:
+        # Do NOT build a huge index here automatically.
+        #
+        # First /search request will build it if required.
+        # This keeps Render health check responsive.
+
+    except Exception:
+
+        app.logger.exception(
+            "APPLICATION INITIALIZATION FAILED"
+        )
+
+
+# ============================================================
+# HOME
 # ============================================================
 
 @app.route("/")
 def home():
+
     return render_template(
         "index.html"
     )
 
 
-@app.route("/health")
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.route(
+    "/health",
+    methods=["GET"]
+)
 def health():
 
-    json_files = 0
+    try:
 
-    if DATA_DIR.exists():
-        json_files = len(
-            list(DATA_DIR.glob("*.json"))
+        create_database()
+
+        json_files = 0
+
+        if DATA_DIR.exists():
+
+            json_files = len(
+                list(
+                    DATA_DIR.glob(
+                        "*.json"
+                    )
+                )
+            )
+
+        index_ready = (
+            index_is_current()
         )
 
-    index_ready = index_is_current()
-
-    record_count = get_metadata(
-        "record_count"
-    )
-
-    return jsonify({
-        "ok": True,
-        "status": "online",
-        "json_files": json_files,
-        "index_ready": index_ready,
-        "indexed_records": int(
-            record_count or 0
+        record_count = (
+            get_metadata(
+                "record_count"
+            )
+            or 0
         )
-    })
+
+        return jsonify({
+            "ok": True,
+            "status": "online",
+            "json_files": json_files,
+            "index_ready": index_ready,
+            "indexed_records": int(
+                record_count
+            )
+        })
+
+    except Exception as exc:
+
+        app.logger.exception(
+            "HEALTH ERROR"
+        )
+
+        return jsonify({
+            "ok": False,
+            "status": "error",
+            "error": str(exc)
+        }), 500
 
 
-@app.route("/search", methods=["POST"])
+# ============================================================
+# SEARCH
+# ============================================================
+
+@app.route(
+    "/search",
+    methods=["POST"]
+)
 def search():
 
     try:
@@ -582,7 +855,10 @@ def search():
             silent=True
         )
 
-        if not isinstance(data, dict):
+        if not isinstance(
+            data,
+            dict
+        ):
 
             return jsonify({
                 "ok": False,
@@ -590,14 +866,19 @@ def search():
             }), 400
 
         numbers = extract_numbers(
-            data.get("numbers")
+            data.get(
+                "numbers"
+            )
         )
 
         if not numbers:
 
             return jsonify({
                 "ok": False,
-                "error": "Please enter at least one valid number"
+                "error": (
+                    "Please enter at least "
+                    "one valid number"
+                )
             }), 400
 
         if len(numbers) > MAX_NUMBERS:
@@ -606,12 +887,18 @@ def search():
                 "ok": False,
                 "error": (
                     f"Maximum "
-                    f"{MAX_NUMBERS} numbers allowed"
+                    f"{MAX_NUMBERS} numbers "
+                    f"allowed"
                 )
             }), 400
 
-        # Build only if necessary.
+        # Build index only if needed.
         if not index_is_current():
+
+            app.logger.info(
+                "INDEX NOT READY - "
+                "BUILDING NOW"
+            )
 
             success = build_index()
 
@@ -619,9 +906,13 @@ def search():
 
                 return jsonify({
                     "ok": False,
-                    "error": "Search index could not be built"
+                    "error": (
+                        "Search index "
+                        "could not be built"
+                    )
                 }), 500
 
+        # FAST DATABASE SEARCH
         results = search_database(
             numbers
         )
@@ -641,49 +932,103 @@ def search():
 
         return jsonify({
             "ok": False,
-            "error": "Search failed",
+            "error": "Internal server error",
             "details": str(exc)
         }), 500
 
 
 # ============================================================
-# DEBUG / STATUS
+# STATUS
 # ============================================================
 
-@app.route("/status")
+@app.route(
+    "/status",
+    methods=["GET"]
+)
 def status():
 
-    return jsonify({
-        "ok": True,
-        "data_directory": str(
-            DATA_DIR
-        ),
-        "database": str(
-            DB_PATH
-        ),
-        "json_files": (
-            len(list(DATA_DIR.glob("*.json")))
-            if DATA_DIR.exists()
-            else 0
-        ),
-        "index_ready": index_is_current(),
-        "indexed_records": int(
-            get_metadata("record_count")
+    try:
+
+        create_database()
+
+        json_files = 0
+
+        if DATA_DIR.exists():
+
+            json_files = len(
+                list(
+                    DATA_DIR.glob(
+                        "*.json"
+                    )
+                )
+            )
+
+        record_count = (
+            get_metadata(
+                "record_count"
+            )
             or 0
         )
-    })
+
+        total_records = (
+            get_metadata(
+                "total_records"
+            )
+            or 0
+        )
+
+        failed_files = (
+            get_metadata(
+                "failed_files"
+            )
+            or 0
+        )
+
+        return jsonify({
+            "ok": True,
+            "json_files": json_files,
+            "index_ready": (
+                index_is_current()
+            ),
+            "indexed_records": int(
+                record_count
+            ),
+            "total_records": int(
+                total_records
+            ),
+            "failed_files": int(
+                failed_files
+            )
+        })
+
+    except Exception as exc:
+
+        app.logger.exception(
+            "STATUS ERROR"
+        )
+
+        return jsonify({
+            "ok": False,
+            "error": str(exc)
+        }), 500
 
 
 # ============================================================
 # BLOCK DIRECT DATA ACCESS
 # ============================================================
 
-@app.route("/data")
-@app.route("/data/")
+@app.route(
+    "/data"
+)
+@app.route(
+    "/data/"
+)
 @app.route(
     "/data/<path:filename>"
 )
-def block_data(filename=None):
+def block_data_access(
+    filename=None
+):
 
     return jsonify({
         "ok": False,
@@ -692,7 +1037,31 @@ def block_data(filename=None):
 
 
 # ============================================================
-# LOCAL START
+# BLOCK DATABASE ACCESS
+# ============================================================
+
+@app.route(
+    "/index/<path:filename>"
+)
+def block_index_access(
+    filename=None
+):
+
+    return jsonify({
+        "ok": False,
+        "error": "Access denied"
+    }), 403
+
+
+# ============================================================
+# INITIALIZE WHEN GUNICORN IMPORTS APP
+# ============================================================
+
+initialize_app()
+
+
+# ============================================================
+# LOCAL RUN
 # ============================================================
 
 if __name__ == "__main__":
@@ -704,17 +1073,29 @@ if __name__ == "__main__":
         )
     )
 
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
+
     print(
         "KRUTIK CYBER EXPERT"
     )
-    print(
-        "HIGH-SPEED JSON SEARCH"
-    )
-    print("=" * 60)
 
     print(
-        "DATA:",
+        "HIGH SPEED JSON SEARCH"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    print(
+        "BASE DIR:",
+        BASE_DIR
+    )
+
+    print(
+        "DATA DIR:",
         DATA_DIR
     )
 
@@ -725,25 +1106,26 @@ if __name__ == "__main__":
 
     if DATA_DIR.exists():
 
-        files = list(
-            DATA_DIR.glob("*.json")
-        )
-
         print(
             "JSON FILES:",
-            len(files)
+            len(
+                list(
+                    DATA_DIR.glob(
+                        "*.json"
+                    )
+                )
+            )
         )
 
     else:
 
         print(
-            "JSON DIRECTORY NOT FOUND"
+            "DATA DIRECTORY NOT FOUND"
         )
 
-    print("=" * 60)
-
-    # Build index before serving locally.
-    build_index()
+    print(
+        "=" * 60
+    )
 
     app.run(
         host="0.0.0.0",
